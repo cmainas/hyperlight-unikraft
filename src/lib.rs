@@ -764,6 +764,97 @@ impl Stream {
     }
 }
 
+/// Guest output taken from a sandbox ([`AppSandbox::take_output`],
+/// [`AppSandbox::take_stderr`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapturedOutput {
+    /// What was kept: everything the guest wrote since the last drain, or
+    /// its first bytes, up to [`SandboxBuilder::output_limit`], cut between
+    /// characters.
+    pub text: String,
+    /// How many bytes were left out: `text.len() + omitted` is all the
+    /// guest wrote since the last drain.
+    pub omitted: u64,
+}
+
+impl CapturedOutput {
+    /// Whether the limit left anything out.
+    pub fn truncated(&self) -> bool {
+        self.omitted > 0
+    }
+}
+
+/// What the print host functions keep of one stream until it is drained.
+#[derive(Default)]
+struct Capture {
+    text: String,
+    omitted: u64,
+}
+
+impl Capture {
+    /// Keep `msg`, or as much of it as fits in `limit` bytes, cut between
+    /// characters, and count the rest.  Once anything is left out, so is
+    /// everything after it until the next drain: what is kept is always the
+    /// beginning of the stream, never a beginning with holes.
+    fn push(&mut self, msg: &str, limit: usize) {
+        let mut keep = if self.omitted > 0 {
+            0
+        } else {
+            msg.len().min(limit.saturating_sub(self.text.len()))
+        };
+        while !msg.is_char_boundary(keep) {
+            keep -= 1;
+        }
+        if keep > 0 {
+            // Grown up to the limit and no further: doubling the capacity
+            // would allocate up to twice the limit.
+            let need = self.text.len() + keep;
+            if need > self.text.capacity() {
+                let want = need.max(self.text.capacity() * 2).min(limit);
+                self.text.reserve_exact(want - self.text.len());
+            }
+            self.text.push_str(&msg[..keep]);
+        }
+        self.omitted += (msg.len() - keep) as u64;
+    }
+
+    fn take(&mut self) -> CapturedOutput {
+        let Capture { text, omitted } = std::mem::take(self);
+        CapturedOutput { text, omitted }
+    }
+}
+
+/// The guest's output on the host: where the print host functions send it,
+/// and what they keep of it for the embedder ([`SandboxBuilder::output_limit`],
+/// [`SandboxBuilder::echo_output`]).
+struct Console {
+    /// Bytes each capture keeps between drains.
+    limit: usize,
+    /// Whether the output also goes to this process's stdout and stderr.
+    echo: bool,
+    /// Standard output and standard error, in the order written.
+    output: Mutex<Capture>,
+    /// Standard error alone.
+    stderr: Mutex<Capture>,
+}
+
+impl Console {
+    fn new(limit: usize, echo: bool) -> Self {
+        Self {
+            limit,
+            echo,
+            output: Mutex::default(),
+            stderr: Mutex::default(),
+        }
+    }
+}
+
+impl Default for Console {
+    fn default() -> Self {
+        Self::new(usize::MAX, true)
+    }
+}
+
 /// Runtime parameters for the guest's host functions.
 ///
 /// Built once during sandbox setup, then used to register identical
@@ -771,7 +862,7 @@ impl Stream {
 ///
 /// The fields are internal — a caller receives a `GuestConfig` from
 /// [`SandboxBuilder::boot`] and interacts with it through the
-/// methods ([`set_env_vars`](Self::set_env_vars), [`drain_stderr`](Self::drain_stderr),
+/// methods ([`set_env_vars`](Self::set_env_vars), [`take_stderr`](Self::take_stderr),
 /// [`drain_output`](Self::drain_output)).
 pub(crate) struct GuestConfig {
     cmdline: String,
@@ -780,12 +871,9 @@ pub(crate) struct GuestConfig {
     initrd_size: u64,
     /// Host filesystem mounts.
     mounts: Vec<Mount>,
-    /// Captured guest output, standard output and standard error in the
-    /// order written — accumulated by the HostPrint and HostPrintErr
+    /// The guest's output, captured by the HostPrint and HostPrintErr
     /// callbacks.
-    output: Arc<Mutex<String>>,
-    /// Captured guest standard error alone — accumulated by HostPrintErr.
-    stderr: Arc<Mutex<String>>,
+    console: Arc<Console>,
     /// NUL-separated KEY=VALUE pairs for guest env vars.
     env_str: Arc<Mutex<String>>,
     /// The guest's `/etc/resolv.conf`, written by the kernel at boot and on
@@ -837,8 +925,7 @@ impl GuestConfig {
             initrd_base,
             initrd_size,
             mounts,
-            output: Arc::new(Mutex::new(String::new())),
-            stderr: Arc::new(Mutex::new(String::new())),
+            console: Arc::default(),
             env_str: Arc::new(Mutex::new(String::new())),
             resolv_conf: Arc::new(Mutex::new(String::new())),
             net,
@@ -860,6 +947,12 @@ impl GuestConfig {
 
     fn with_host_print_err(mut self, on: bool) -> Self {
         self.host_print_err = on;
+        self
+    }
+
+    /// Where the guest's output goes; set before [`register`](Self::register).
+    fn with_console(mut self, console: Console) -> Self {
+        self.console = Arc::new(console);
         self
     }
 
@@ -925,49 +1018,59 @@ impl GuestConfig {
         *self.resolv_conf.lock().unwrap() = with_single_request(content);
     }
 
-    /// Drain captured guest output, clearing the buffer and the
-    /// standard-error one, so a caller that never drains standard error
-    /// does not grow it.
-    pub fn drain_output(&self) -> String {
-        *self.stderr.lock().unwrap() = String::new();
-        std::mem::take(&mut *self.output.lock().unwrap())
+    /// Take the captured guest output, clearing it and the standard-error
+    /// capture, so a caller that never drains standard error does not
+    /// grow it.
+    pub fn take_output(&self) -> CapturedOutput {
+        self.console.stderr.lock().unwrap().take();
+        self.console.output.lock().unwrap().take()
     }
 
-    /// Drain captured guest standard error, clearing that buffer.
-    pub fn drain_stderr(&self) -> String {
-        std::mem::take(&mut *self.stderr.lock().unwrap())
+    /// Take the captured guest standard error, clearing it.
+    pub fn take_stderr(&self) -> CapturedOutput {
+        self.console.stderr.lock().unwrap().take()
+    }
+
+    /// Drain captured guest output: [`take_output`](Self::take_output)'s
+    /// text.
+    pub fn drain_output(&self) -> String {
+        self.take_output().text
     }
 
     /// The print host function for `stream`: the guest's text to the host's
-    /// stdout or stderr, flushed, and captured — standard error both with the
-    /// rest and on its own.  It uses `print!`/`eprint!`, which a test harness
-    /// captures and which panic on a failed write, so `hluk run | head -1`
-    /// ends when its reader does.
+    /// stdout or stderr, flushed, unless echo is off, and captured up to the
+    /// limit — standard error both with the rest and on its own.  It uses
+    /// `print!`/`eprint!`, which a test harness captures and which panic on
+    /// a failed write, so `hluk run | head -1` ends when its reader does.
+    /// The guest is told all of its text was written, kept or not.
     fn print_host_function(
         &self,
         stream: Stream,
     ) -> impl Fn(String) -> hyperlight_host::Result<i32> + Send + Sync + 'static {
         let prof = self.profile.clone();
-        let output = self.output.clone();
-        let stderr = self.stderr.clone();
+        let console = self.console.clone();
         let name = stream.host_function();
         move |msg: String| {
             use std::io::Write;
             let _profile = prof.host(name);
             // Captured after the write, so a failed one leaves both
-            // buffers as they were.
+            // captures as they were.
             match stream {
                 Stream::Out => {
-                    print!("{msg}");
-                    let _ = std::io::stdout().flush();
+                    if console.echo {
+                        print!("{msg}");
+                        let _ = std::io::stdout().flush();
+                    }
                 }
                 Stream::Err => {
                     // Unbuffered: nothing to flush.
-                    eprint!("{msg}");
-                    stderr.lock().unwrap().push_str(&msg);
+                    if console.echo {
+                        eprint!("{msg}");
+                    }
+                    console.stderr.lock().unwrap().push(&msg, console.limit);
                 }
             }
-            output.lock().unwrap().push_str(&msg);
+            console.output.lock().unwrap().push(&msg, console.limit);
             Ok(msg.len() as i32)
         }
     }
@@ -1606,6 +1709,7 @@ fn assemble_sandbox(
     listen_ports: Option<ListenPorts>,
     host_functions: HostFunctionTable,
     host_print_err: bool,
+    console: Console,
 ) -> Result<(UninitializedSandbox, GuestConfig)> {
     let scratch_size = scratch_mb * 1024 * 1024;
     info!(scratch_mb, "guest memory");
@@ -1679,7 +1783,8 @@ fn assemble_sandbox(
         listen_ports,
     )
     .with_host_functions(host_functions)
-    .with_host_print_err(host_print_err);
+    .with_host_print_err(host_print_err)
+    .with_console(console);
 
     config.register(&mut usandbox)?;
 
@@ -1729,6 +1834,8 @@ pub struct SandboxBuilder {
     host_functions: std::collections::BTreeMap<String, HostFunction>,
     profile: Option<bool>,
     host_print_err: bool,
+    output_limit: usize,
+    echo_output: bool,
 }
 
 impl SandboxBuilder {
@@ -1748,6 +1855,8 @@ impl SandboxBuilder {
             host_functions: std::collections::BTreeMap::new(),
             profile: None,
             host_print_err: true,
+            output_limit: usize::MAX,
+            echo_output: true,
         }
     }
 
@@ -1911,6 +2020,48 @@ impl SandboxBuilder {
         self
     }
 
+    /// Keep at most `bytes` of the guest's output for
+    /// [`drain_output`](AppSandbox::drain_output) between drains, and at
+    /// most `bytes` of its standard error for
+    /// [`drain_stderr`](AppSandbox::drain_stderr).  The host keeps the
+    /// beginning, cut between characters, and counts what it leaves out
+    /// ([`take_output`](AppSandbox::take_output)); the guest carries on,
+    /// told its writes succeeded.  Unlimited by default; `0` keeps nothing.
+    ///
+    /// Enforced on the host, so no guest code gets past it, and the same
+    /// for a fresh guest and a restored one.  What the guest prints while it
+    /// boots counts toward the first drain; drain after every call to give
+    /// each its own budget.  It bounds what the host keeps, not the echo:
+    /// all of it still reaches this process's stdout and stderr unless
+    /// [`echo_output(false)`](Self::echo_output).
+    ///
+    /// ```no_run
+    /// # use hyperlight_unikraft::SandboxBuilder;
+    /// let mut sandbox = SandboxBuilder::from_initrd("rootfs/python.cpio")
+    ///     .output_limit(1 << 20)
+    ///     .echo_output(false)
+    ///     .boot()?;
+    /// sandbox.drain_output(); // the boot's
+    /// sandbox.run("print('x' * (2 << 20))")?;
+    /// let output = sandbox.take_output();
+    /// assert_eq!(output.text.len(), 1 << 20);
+    /// assert!(output.truncated());
+    /// # Ok::<(), hyperlight_unikraft::Error>(())
+    /// ```
+    pub fn output_limit(mut self, bytes: usize) -> Self {
+        self.output_limit = bytes;
+        self
+    }
+
+    /// Whether the guest's output also goes to this process's stdout, and
+    /// its standard error to this process's stderr, as it is written.  On by
+    /// default; off, the output is only captured, up to
+    /// [`output_limit`](Self::output_limit).
+    pub fn echo_output(mut self, on: bool) -> Self {
+        self.echo_output = on;
+        self
+    }
+
     /// Leave out the `HostPrintErr` host function, as an older or
     /// third-party host does: the guest's standard error then reaches
     /// `HostPrint`.  For testing that fallback, on a fresh boot: a snapshot
@@ -1942,6 +2093,8 @@ impl SandboxBuilder {
             host_functions,
             profile,
             host_print_err,
+            output_limit,
+            echo_output,
         } = self;
         // The empty name asks for the list of functions, one per line, so
         // neither it nor a line break can be in a function's name.
@@ -1978,6 +2131,7 @@ impl SandboxBuilder {
                     listen_ports,
                     host_functions,
                     host_print_err,
+                    Console::new(output_limit, echo_output),
                 )?;
                 if let Some(on) = profile {
                     cfg.profile.set_enabled(on);
@@ -2029,6 +2183,7 @@ impl SandboxBuilder {
                     listen_ports,
                     host_functions,
                     host_print_err,
+                    Console::new(output_limit, echo_output),
                 )?;
                 // Before the boot: the kernel fetches the environment once
                 // on its way to main(), so an entry-point program starts
@@ -2047,10 +2202,15 @@ impl SandboxBuilder {
                 {
                     Ok(sandbox) => sandbox,
                     Err(e) => {
-                        // The guest's last words are the diagnosis.
-                        let output = cfg.drain_output();
-                        if !output.is_empty() {
-                            tracing::error!(%output, "guest console output before the boot failure");
+                        // The guest's output is the diagnosis: all of it, or
+                        // under a limit its beginning and how much is missing.
+                        let output = cfg.take_output();
+                        if !output.text.is_empty() || output.truncated() {
+                            tracing::error!(
+                                output = %output.text,
+                                omitted = output.omitted,
+                                "guest console output before the boot failure"
+                            );
                         }
                         return Err(e.into());
                     }
@@ -2529,8 +2689,8 @@ impl AppSandbox {
 
     /// Take the guest output captured so far: standard output and
     /// standard error, in the order the guest wrote them.  It also drops
-    /// what [`drain_stderr`](Self::drain_stderr) would return, so take that
-    /// first.
+    /// what [`take_stderr`](Self::take_stderr) would return, text and
+    /// omitted count, so take that first.
     pub fn drain_output(&self) -> String {
         self.config.drain_output()
     }
@@ -2538,7 +2698,19 @@ impl AppSandbox {
     /// Take the guest standard error captured so far, apart from standard
     /// output.  [`drain_output`](Self::drain_output) has it too, in place.
     pub fn drain_stderr(&self) -> String {
-        self.config.drain_stderr()
+        self.config.take_stderr().text
+    }
+
+    /// [`drain_output`](Self::drain_output), and how many bytes
+    /// [`SandboxBuilder::output_limit`] left out of it.
+    pub fn take_output(&self) -> CapturedOutput {
+        self.config.take_output()
+    }
+
+    /// [`drain_stderr`](Self::drain_stderr), and how many bytes
+    /// [`SandboxBuilder::output_limit`] left out of it.
+    pub fn take_stderr(&self) -> CapturedOutput {
+        self.config.take_stderr()
     }
 
     /// This sandbox's profile ([`SandboxBuilder::profile`]): print its
@@ -2576,6 +2748,7 @@ fn restore_snapshot(
     listen_ports: Option<ListenPorts>,
     host_functions: HostFunctionTable,
     host_print_err: bool,
+    console: Console,
 ) -> Result<(MultiUseSandbox, GuestConfig)> {
     let config = GuestConfig::new(
         String::new(),
@@ -2587,7 +2760,8 @@ fn restore_snapshot(
         listen_ports,
     )
     .with_host_functions(host_functions)
-    .with_host_print_err(host_print_err);
+    .with_host_print_err(host_print_err)
+    .with_console(console);
     let mut hf = HostFunctions::default();
     config.register(&mut hf)?;
 
@@ -2637,6 +2811,66 @@ mod tests {
         );
         assert_eq!(snapshot_tag_key("0.15.0-kappa-c2"), None);
         assert_eq!(describe_snapshot_tag("0.14.0"), "0.14.0");
+    }
+
+    #[test]
+    fn capture_keeps_everything_under_the_limit() {
+        let mut c = Capture::default();
+        c.push("hello ", 16);
+        c.push("world", 16);
+        assert_eq!(
+            c.take(),
+            CapturedOutput {
+                text: "hello world".into(),
+                omitted: 0
+            }
+        );
+    }
+
+    #[test]
+    fn capture_keeps_the_beginning_and_counts_the_rest() {
+        let mut c = Capture::default();
+        c.push("abcdef", 4);
+        // Room for one more byte later, but the stream has a hole now.
+        c.push("g", 8);
+        let out = c.take();
+        assert_eq!(out.text, "abcd");
+        assert_eq!(out.omitted, 3);
+        assert!(out.truncated());
+        // Drained: a new budget.
+        c.push("xy", 4);
+        assert_eq!(c.take().text, "xy");
+    }
+
+    #[test]
+    fn capture_cuts_between_characters() {
+        let mut c = Capture::default();
+        // "é" is two bytes; the limit falls inside the second one.
+        c.push("aéb", 2);
+        let out = c.take();
+        assert_eq!(out.text, "a");
+        assert_eq!(out.omitted, 3);
+    }
+
+    #[test]
+    fn capture_of_nothing() {
+        let mut c = Capture::default();
+        c.push("abc", 0);
+        c.push("", 0);
+        let out = c.take();
+        assert_eq!(out.text, "");
+        assert_eq!(out.omitted, 3);
+    }
+
+    #[test]
+    fn capture_allocates_no_more_than_the_limit() {
+        let mut c = Capture::default();
+        for _ in 0..1000 {
+            c.push(&"x".repeat(100), 10_000);
+        }
+        assert_eq!(c.text.len(), 10_000);
+        assert_eq!(c.text.capacity(), 10_000);
+        assert_eq!(c.omitted, 90_000);
     }
 
     #[test]

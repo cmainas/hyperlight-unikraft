@@ -32,6 +32,8 @@ assert_eq!(out, r#"{"message":"Hello, Ada"}"#);
 
 `AppSandbox::call(function, input)` calls the guest function and waits for its result, which comes back as a string. Anything the function prints goes to `drain_output()`, as it does for `run`; its standard error also goes to `drain_stderr()` on its own, which `drain_output()` clears, so take it first.
 
+The host keeps all of it until it is drained, unless `SandboxBuilder::output_limit(bytes)` bounds it: then it keeps the first `bytes` of each and counts the rest, which `take_output()` and `take_stderr()` report with the text. `echo_output(false)` stops the copy to the host process's own stdout and stderr.
+
 | Image | `function` is | `input` | Result |
 |---|---|---|---|
 | quickjs | a global function (`function f() {}`, `var`, or `globalThis.f = ...`) | JSON, passed as the one argument | the return value (awaited if it is a promise) as JSON |

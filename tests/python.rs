@@ -967,3 +967,131 @@ fn python_stderr_reaches_a_host_without_host_print_err() {
         format!("out\nerr\n{}\nout again\n", "e".repeat(10000))
     );
 }
+
+/// The issue's program: 4 MiB written 1 KiB at a time keeps the first
+/// 64 KiB on the host and counts the rest, however the guest writes it,
+/// reopening `/dev/stdout` included.  The next call starts a new budget.
+#[test]
+fn python_output_limit() {
+    const LIMIT: usize = 64 * 1024;
+    const WRITTEN: u64 = 4096 * 1024;
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .output_limit(LIMIT)
+        .echo_output(false)
+        .boot()
+        .unwrap();
+    sandbox.drain_output();
+
+    for code in [
+        "import os\nfor _ in range(4096): os.write(1, b'X' * 1024)",
+        "f = open('/dev/stdout', 'wb', buffering=0)\nfor _ in range(4096): f.write(b'X' * 1024)",
+    ] {
+        sandbox.run(code).unwrap();
+        let output = sandbox.take_output();
+        assert_eq!(output.text.len(), LIMIT, "{code}");
+        assert!(output.text.bytes().all(|b| b == b'X'), "{code}");
+        assert_eq!(output.omitted, WRITTEN - LIMIT as u64, "{code}");
+    }
+
+    sandbox.run("print('next')").unwrap();
+    let output = sandbox.take_output();
+    assert_eq!(output.text, "next\n");
+    assert!(!output.truncated());
+}
+
+/// Standard error has a budget of its own, and `take_output` clears it.
+#[test]
+fn python_output_limit_stderr() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .output_limit(100)
+        .echo_output(false)
+        .boot()
+        .unwrap();
+    sandbox.drain_output();
+
+    sandbox
+        .run("import os\nos.write(2, b'E' * 300)\nos.write(1, b'O' * 10)")
+        .unwrap();
+    let stderr = sandbox.take_stderr();
+    assert_eq!(stderr.text, "E".repeat(100));
+    assert_eq!(stderr.omitted, 200);
+    let output = sandbox.take_output();
+    assert_eq!(output.text, "E".repeat(100));
+    assert_eq!(output.omitted, 210);
+
+    sandbox.run("import os\nos.write(2, b'E' * 300)").unwrap();
+    sandbox.drain_output();
+    assert_eq!(sandbox.take_stderr(), Default::default());
+}
+
+/// A restored guest gets the limit of the builder that restores it.
+#[test]
+fn python_output_limit_after_restore() {
+    let rootfs = require_rootfs("python");
+    let snap_dir = temp_dir("py-output-limit");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox.snapshot_to(&snap_dir).unwrap();
+
+    let mut sandbox = SandboxBuilder::from_snapshot_dir(&snap_dir)
+        .unwrap()
+        .output_limit(10)
+        .echo_output(false)
+        .boot()
+        .unwrap();
+    sandbox.drain_output();
+    sandbox.run("print('0123456789abcdef')").unwrap();
+    let output = sandbox.take_output();
+    assert_eq!(output.text, "0123456789");
+    assert_eq!(output.omitted, 7);
+}
+
+/// Off, `echo_output` keeps the guest's output off this process's stdout
+/// and stderr; on, the default, each stream reaches its own.  The test
+/// harness captures what a test prints, so each case runs in a child, this
+/// test again, uncaptured.
+#[test]
+fn python_echo_output() {
+    if let Ok(echo) = std::env::var("HLUK_TEST_ECHO") {
+        let mut builder = SandboxBuilder::from_initrd(require_rootfs("python")).scratch_mb(256);
+        // "on" is the default, left as it is.
+        if echo == "off" {
+            builder = builder.echo_output(false);
+        }
+        let mut sandbox = builder.boot().unwrap();
+        sandbox
+            .run("import os\nos.write(1, b'marker-out')\nos.write(2, b'marker-err')")
+            .unwrap();
+        // Captured either way.
+        assert_eq!(sandbox.drain_stderr(), "marker-err");
+        return;
+    }
+    for (echo, shown) in [("off", false), ("on", true)] {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["python_echo_output", "--exact", "--nocapture"])
+            .env("HLUK_TEST_ECHO", echo)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        let stderr = String::from_utf8_lossy(&child.stderr);
+        assert!(child.status.success(), "echo {echo}: {stdout}{stderr}");
+        assert_eq!(
+            stdout.contains("marker-out"),
+            shown,
+            "echo {echo}: {stdout}"
+        );
+        assert_eq!(
+            stderr.contains("marker-err"),
+            shown,
+            "echo {echo}: {stderr}"
+        );
+        assert!(!stdout.contains("marker-err"), "echo {echo}: {stdout}");
+        assert!(!stderr.contains("marker-out"), "echo {echo}: {stderr}");
+    }
+}
