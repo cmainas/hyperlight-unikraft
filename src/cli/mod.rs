@@ -32,7 +32,7 @@ use hyperlight_unikraft::{
 };
 
 use crate::{
-    Call, CliResult, PortSpec, base_builder, drive, elapsed_ms, parse_envs, parse_mounts,
+    Call, CliResult, PortSpec, base_builder, boot, drive, elapsed_ms, parse_envs, parse_mounts,
     parse_net_policy, read_resolv_conf, resolve_exec,
 };
 use manifest::{Manifest, RootfsSource, Workload};
@@ -974,7 +974,7 @@ pub fn run(args: RunArgs) -> CliResult<()> {
     }
 
     let t = Instant::now();
-    let mut sandbox = builder.boot()?;
+    let mut sandbox = boot(builder)?;
     info!(elapsed_ms = elapsed_ms(t), restored, "boot");
 
     if let Some(key) = warm_key

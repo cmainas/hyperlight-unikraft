@@ -492,6 +492,13 @@ fn base_builder(kernel: Option<PathBuf>, initrd: Option<PathBuf>) -> CliResult<S
     }
 }
 
+/// Boot `builder` for the CLI, which echoes the guest's output as it is
+/// written and never drains it, so keeps none: a long-running guest would
+/// grow the capture without end.
+fn boot(builder: SandboxBuilder) -> hyperlight_unikraft::Result<AppSandbox> {
+    builder.output_limit(0).boot()
+}
+
 /// A function to call once the workload has run (`--call`, `--input`).
 struct Call {
     function: String,
@@ -607,7 +614,7 @@ fn cmd_snapshot_save(args: SaveArgs) -> CliResult<()> {
     if let Some(rc) = read_resolv_conf(args.resolv_conf.as_ref())? {
         builder = builder.resolv_conf(rc);
     }
-    let mut sandbox = builder.boot()?;
+    let mut sandbox = boot(builder)?;
     // What the snapshot should have loaded, run before it is taken.
     if let Some(code) = &args.warm_exec {
         if !sandbox.has_driver() {
@@ -667,7 +674,7 @@ fn cmd_snapshot_run(args: SnapshotRunArgs) -> CliResult<()> {
     }
 
     let t = Instant::now();
-    let mut sandbox = builder.boot()?;
+    let mut sandbox = boot(builder)?;
     info!(elapsed_ms = elapsed_ms(t), "restored from snapshot");
 
     // Precedence: host script / --exec code; else --guest-exec; else the
@@ -798,7 +805,7 @@ fn bench_cold(args: BenchColdArgs) -> CliResult<()> {
         if let Some(mb) = args.scratch_mb {
             builder = builder.scratch_mb(mb);
         }
-        let mut sandbox = builder.boot()?;
+        let mut sandbox = boot(builder)?;
         let boot_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         let t1 = Instant::now();
@@ -836,7 +843,7 @@ fn bench_cold_snap(args: BenchSnapArgs) -> CliResult<()> {
         let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         let t1 = Instant::now();
-        let mut sandbox = builder.mounts(mounts.iter().cloned()).boot()?;
+        let mut sandbox = boot(builder.mounts(mounts.iter().cloned()))?;
         let restore_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         let t2 = Instant::now();
@@ -870,9 +877,7 @@ fn bench_warm_restore(args: BenchSnapArgs) -> CliResult<()> {
 
     let t0 = Instant::now();
     let snap = load_snapshot(&args.snapshot)?;
-    let mut sandbox = SandboxBuilder::from_snapshot(snap.clone())
-        .mounts(mounts)
-        .boot()?;
+    let mut sandbox = boot(SandboxBuilder::from_snapshot(snap.clone()).mounts(mounts))?;
     let setup_ms = t0.elapsed().as_secs_f64() * 1000.0;
     println!("BENCH warm-restore setup_ms={setup_ms:.3}");
 
@@ -907,7 +912,7 @@ fn bench_warm_stateful(args: BenchSnapArgs) -> CliResult<()> {
 
     let t0 = Instant::now();
     let snap = load_snapshot(&args.snapshot)?;
-    let mut sandbox = SandboxBuilder::from_snapshot(snap).mounts(mounts).boot()?;
+    let mut sandbox = boot(SandboxBuilder::from_snapshot(snap).mounts(mounts))?;
     let setup_ms = t0.elapsed().as_secs_f64() * 1000.0;
     println!("BENCH warm-stateful setup_ms={setup_ms:.3}");
 
@@ -950,9 +955,7 @@ fn bench_parallel(args: BenchParallelArgs) -> CliResult<()> {
                 barrier.wait();
                 let vm_start = Instant::now();
 
-                let mut sandbox = SandboxBuilder::from_snapshot(snap.clone())
-                    .mounts(mounts)
-                    .boot()
+                let mut sandbox = boot(SandboxBuilder::from_snapshot(snap.clone()).mounts(mounts))
                     .map_err(|e| e.to_string())?;
                 let mut execs = Vec::with_capacity(iterations);
 
