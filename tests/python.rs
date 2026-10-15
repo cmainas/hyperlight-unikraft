@@ -4,7 +4,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{hluk_with_stdin, require_rootfs, temp_dir};
+use common::{hluk_with_stdin, require_rootfs, run_http_get, temp_dir};
 use hyperlight_unikraft::{Error, Exec, ListenPorts, Mount, NetworkPolicy, SandboxBuilder};
 
 #[test]
@@ -656,18 +656,14 @@ fn python_http_server_client() {
 #[test]
 fn python_http_get() {
     let rootfs = require_rootfs("python");
-    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
-        .scratch_mb(256)
-        .network(NetworkPolicy::AllowAll)
-        .boot()
-        .unwrap();
-
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/python/http_get.py");
-    sandbox.run(Exec::File(script)).unwrap();
-    let output = sandbox.drain_output();
+    let output = run_http_get(
+        || SandboxBuilder::from_initrd(rootfs.clone()).scratch_mb(256),
+        Exec::File(script),
+    );
     assert!(
         output.contains("Status: 200"),
-        "expected http_get.py to get Status: 200, got: {output:?}",
+        "expected http_get.py to get Status: 200, got:\n{output}",
     );
 }
 

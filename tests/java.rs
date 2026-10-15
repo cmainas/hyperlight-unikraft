@@ -11,8 +11,8 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::{hluk_with_stdin_scratch, require_rootfs, temp_dir};
-use hyperlight_unikraft::{Error, Exec, Mount, NetworkPolicy, SandboxBuilder};
+use common::{hluk_with_stdin_scratch, require_rootfs, run_http_get, temp_dir};
+use hyperlight_unikraft::{Error, Exec, Mount, SandboxBuilder};
 
 const SCRATCH_MB: usize = 512;
 
@@ -365,10 +365,8 @@ fn java_threading() {
 
 #[test]
 fn java_http_get() {
-    let mut sandbox = builder().network(NetworkPolicy::AllowAll).boot().unwrap();
-    sandbox.run(example("HttpGet.java")).unwrap();
-    let output = sandbox.drain_output();
-    assert!(output.contains("Status: 200"), "{output:?}");
+    let output = run_http_get(builder, example("HttpGet.java"));
+    assert!(output.contains("Status: 200"), "{output}");
 }
 
 /// A call ends when its code returns; a thread it started is left behind

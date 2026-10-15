@@ -4,10 +4,10 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{hluk_with_stdin_scratch, require_rootfs, temp_dir};
+use common::{hluk_with_stdin_scratch, require_rootfs, run_http_get, temp_dir};
 use std::time::{Duration, Instant};
 
-use hyperlight_unikraft::{Exec, Mount, NetworkPolicy, SandboxBuilder, Yield};
+use hyperlight_unikraft::{Exec, Mount, SandboxBuilder, Yield};
 
 #[test]
 fn node_exec_file() {
@@ -126,18 +126,14 @@ fn node_fs_ops() {
 #[test]
 fn node_http_get() {
     let rootfs = require_rootfs("node");
-    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
-        .scratch_mb(512)
-        .network(NetworkPolicy::AllowAll)
-        .boot()
-        .unwrap();
-
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/node/http_get.js");
-    sandbox.run(Exec::File(script)).unwrap();
-    let output = sandbox.drain_output();
+    let output = run_http_get(
+        || SandboxBuilder::from_initrd(rootfs.clone()).scratch_mb(512),
+        Exec::File(script),
+    );
     assert!(
         output.contains("Status: 200"),
-        "expected http_get.js to get Status: 200, got: {output:?}",
+        "expected http_get.js to get Status: 200, got:\n{output}",
     );
 }
 

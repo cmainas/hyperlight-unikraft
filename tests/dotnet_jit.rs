@@ -5,8 +5,8 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::{hluk_with_stdin_scratch, require_rootfs, temp_dir};
-use hyperlight_unikraft::{Exec, Mount, NetworkPolicy, SandboxBuilder};
+use common::{hluk_with_stdin_scratch, require_rootfs, run_http_get, temp_dir};
+use hyperlight_unikraft::{Exec, Mount, SandboxBuilder};
 
 #[test]
 fn dotnet_jit_inline_code() {
@@ -211,18 +211,15 @@ fn dotnet_jit_threading() {
 #[test]
 fn dotnet_jit_http_get() {
     let rootfs = require_rootfs("dotnet-jit");
-    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
-        .scratch_mb(768)
-        .network(NetworkPolicy::AllowAll)
-        .boot()
-        .unwrap();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/dotnet-jit/HttpGet.cs");
-    sandbox.run(Exec::File(script)).unwrap();
-    let output = sandbox.drain_output();
+    let output = run_http_get(
+        || SandboxBuilder::from_initrd(rootfs.clone()).scratch_mb(768),
+        Exec::File(script),
+    );
 
     assert!(
         output.contains("Status: 200"),
-        "expected HttpGet.cs to get Status: 200, got: {output:?}",
+        "expected HttpGet.cs to get Status: 200, got:\n{output}",
     );
 }
 

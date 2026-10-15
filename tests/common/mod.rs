@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use hyperlight_unikraft::{ListenPorts, NetworkPolicy, SandboxBuilder};
+use hyperlight_unikraft::{Error, Exec, ListenPorts, NetworkPolicy, SandboxBuilder};
 
 #[allow(dead_code)]
 pub fn rootfs(runtime: &str) -> Option<PathBuf> {
@@ -158,4 +158,102 @@ pub fn net_probe(
     );
     let _ = sandbox.run(&*code);
     sandbox.drain_output()
+}
+
+/// Runs an HTTP GET example, which fetches an outside service, and returns
+/// what it printed, for the caller to check the status in.  A 5xx is the
+/// service's failure, not the guest's (httpbin.org answers 502 now and
+/// then), so the example runs again, `ATTEMPTS` times in all, `PAUSES`
+/// apart, each time in a fresh sandbox from `builder` with the network
+/// policy set to `AllowAll` (a reused one keeps the failed attempt's
+/// sockets); after the last, its output is returned like any other.
+/// Anything else ends it, as the guest's: a run that fails panics here
+/// (Python raises on a 4xx, and all but Node on a DNS or connection error),
+/// and what the examples print instead (Node both, the others another
+/// status) is what the caller's check fails on.  Every attempt is in the
+/// output, and a retry is a warning naming the example, so a guest that
+/// makes the service fail does not pass quietly.
+#[allow(dead_code)]
+pub fn run_http_get(builder: impl Fn() -> SandboxBuilder, exec: Exec) -> String {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+
+    const PAUSES: [u64; 2] = [2, 5];
+    const ATTEMPTS: usize = PAUSES.len() + 1;
+    let mut output = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let mut sandbox = match builder().network(NetworkPolicy::AllowAll).boot() {
+            Ok(sandbox) => sandbox,
+            Err(e) => panic!("the HTTP GET sandbox did not boot: {e:?}\n{output}"),
+        };
+        let result = sandbox.run(exec.clone());
+        let out = sandbox.drain_output();
+        drop(sandbox);
+        let _ = write!(output, "--- attempt {attempt} ---\n{out}");
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+        // The examples print a 5xx and return; Python's urllib raises on
+        // one, which fails the call.  A run that fails after printing one
+        // failed some other way.
+        let retryable = match &result {
+            Ok(()) => printed_5xx(&out),
+            Err(Error::CallFailed { .. }) => urllib_raised_5xx(&out),
+            Err(_) => false,
+        };
+        if let Err(e) = &result {
+            let _ = writeln!(output, "[run failed: {e:?}]");
+        }
+        if !retryable {
+            if let Err(e) = result {
+                panic!("the HTTP GET example failed: {e:?}\n{output}");
+            }
+            break;
+        }
+        if attempt == ATTEMPTS {
+            break;
+        }
+        let pause = PAUSES[attempt - 1];
+        let example = match &exec {
+            Exec::File(path) => path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            _ => "the example".to_string(),
+        };
+        // Straight to stderr, past the test harness's capture, so that it
+        // shows on a test that then passes; an annotation on GitHub.
+        let prefix = if std::env::var_os("GITHUB_ACTIONS").is_some() {
+            "::warning::"
+        } else {
+            "warning: "
+        };
+        let _ = writeln!(
+            std::io::stderr(),
+            "{prefix}{example}: HTTP GET attempt {attempt} of {ATTEMPTS} got a server error, trying again in {pause} s",
+        );
+        std::thread::sleep(std::time::Duration::from_secs(pause));
+    }
+    output
+}
+
+fn is_5xx(code: &str) -> bool {
+    code.len() == 3 && code.starts_with('5') && code.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Whether an HTTP GET example printed a 5xx: a line `Status: 5NN`
+fn printed_5xx(output: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.trim_end().strip_prefix("Status: ").is_some_and(is_5xx))
+}
+
+/// Whether Python's urllib raised for a 5xx:
+/// `urllib.error.HTTPError: HTTP Error 5NN: <reason>`
+fn urllib_raised_5xx(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.strip_prefix("urllib.error.HTTPError: HTTP Error ")
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(code, _)| is_5xx(code))
+    })
 }
