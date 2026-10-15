@@ -68,7 +68,8 @@ updates:
       - /drivers/python-shell
       - /drivers/quickjs
       - /drivers/rust
-      - /drivers/wasmtime
+      # Not drivers/wasmtime: it builds from the rust image of the release
+      # rust-toolchain.toml pins, and moves with it.
       - /examples/agent-framework
       - /examples/agent/custom
       - /examples/http-server/express
@@ -89,8 +90,6 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
-      # The same Rust as rust-toolchain.toml; bumped with it.
-      - dependency-name: rust
       # The amd64 image must stay the release the arm64 stage downloads
       # (PWSH_VERSION in drivers/powershell/Dockerfile).
       - dependency-name: powershell

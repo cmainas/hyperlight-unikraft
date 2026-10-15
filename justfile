@@ -362,15 +362,35 @@ build-rootfs runtime dockerfile="":
     fi
     echo "==> Building image $image from $df"
     platform="{{rootfs_platform}}"
+    # The Rust a Dockerfile builds with (drivers/wasmtime), for one that asks.
+    rust=
+    if grep -q '^ARG RUST_VERSION' "$df"; then
+        rust=$(just _rust-version)
+    fi
     docker build ${platform:+--platform "$platform"} \
         --build-arg BUSYBOX=hluk-busybox{{rootfs_suffix}} \
         --build-arg ROOTFS_SUFFIX={{rootfs_suffix}} \
+        ${rust:+--build-arg RUST_VERSION="$rust"} \
         -t "$image" -f "$df" "{{root_dir}}/"
     just _export-cpio "{{runtime}}" "$image"
 
 [windows]
 build-rootfs runtime dockerfile="":
     @Write-Error "build-rootfs needs Docker + cpio on Linux. Build there (just build-rootfs {{runtime}}) and copy build-elfloader/{{runtime}}-rootfs.cpio here."; exit 1
+
+# The Rust release rust-toolchain.toml pins, read as arm64.yml reads it.  A
+# release, as the rust:<release> images Docker builds from are named.
+[private]
+[unix]
+_rust-version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rust=$(sed -n 's/^channel = "\(.*\)"/\1/p' "{{root_dir}}/rust-toolchain.toml")
+    [[ "$rust" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || {
+        echo "error: rust-toolchain.toml pins no release (channel = \"1.99.0\"): '$rust'" >&2
+        exit 1
+    }
+    echo "$rust"
 
 # Export a rootfs docker image to build-elfloader/<runtime>-rootfs.cpio.
 # Used by build-rootfs after the docker build.
@@ -604,15 +624,19 @@ rebuild-rootfs runtime:
         echo "error: $dockerfile not found" >&2
         exit 1
     fi
+    rust=
+    if grep -q '^ARG RUST_VERSION' "$dockerfile"; then
+        rust=$(just _rust-version)
+    fi
     # Pull fresh base images (skip local build stages like "hluk-python-rootfs")
-    for img in $(grep '^FROM ' "$dockerfile" | awk '{print $2}' | sort -u); do
+    for img in $(grep '^FROM ' "$dockerfile" | awk '{print $2}' | sed "s/\${RUST_VERSION[^}]*}/$rust/" | sort -u); do
         if docker pull "$img" 2>/dev/null; then
             echo "==> Pulled $img"
         fi
     done
     image="hluk-{{runtime}}-rootfs"
     echo "==> Rebuilding $image (--no-cache)"
-    docker build --no-cache -t "$image" -f "$dockerfile" "{{root_dir}}/"
+    docker build --no-cache ${rust:+--build-arg RUST_VERSION="$rust"} -t "$image" -f "$dockerfile" "{{root_dir}}/"
     just build-rootfs "{{runtime}}"
     # Rebuild the conformance rootfs too (it inherits the base image)
     conformance_dockerfile="{{conformance_dir}}/{{runtime}}/Dockerfile"
