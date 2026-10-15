@@ -752,7 +752,7 @@ example-java: (run "java" (examples_dir / "java" / "Hello.java"))
 # Build the compiled-language example binaries that tests/compiled.rs
 # mounts into the guest, into build-elfloader/bins/<runtime>/.  Linux
 # ELF output, so like build-rootfs this runs on Linux; copy
-# build-elfloader/bins/ to other hosts.  Needs gcc/g++, rustc, go and
+# build-elfloader/bins/ to other hosts.  Needs gcc/g++, rustup, go and
 # Docker: the musl C programs and .NET AOT are built in Alpine images.
 [unix]
 build-test-bins:
@@ -777,6 +777,9 @@ build-test-bins:
                 chown "$HOST_UID:$HOST_GID" /out/$src
             done'
     echo "==> Rust"
+    # The pinned toolchain first: `target add` installing it by itself is
+    # deprecated in rustup.
+    rustup toolchain install
     for src in hello env_vars; do
         rustc -C opt-level=2 -C target-feature=+crt-static -C relocation-model=pie \
             -o "$bins/rust/$src" "{{examples_dir}}/rust/$src.rs"

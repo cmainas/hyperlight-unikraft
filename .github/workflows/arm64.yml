@@ -52,7 +52,9 @@ jobs:
 
       - name: Cache key
         id: key
-        run: echo "key=rootfs-arm64-rust199beta-muslaot-${{ hashFiles('drivers/**', 'examples/agent/custom/Dockerfile', 'examples/c/**', 'examples/rust/**', 'examples/go/**', 'examples/wasmtime/**', 'examples/dotnet-aot/**') }}" >> "$GITHUB_OUTPUT"
+        # "muslaot": the .NET AOT test programs moved to a musl toolchain,
+        # invalidating earlier entries.
+        run: echo "key=rootfs-arm64-muslaot-${{ hashFiles('rust-toolchain.toml', 'drivers/**', 'examples/agent/custom/Dockerfile', 'examples/c/**', 'examples/rust/**', 'examples/go/**', 'examples/wasmtime/**', 'examples/dotnet-aot/**') }}" >> "$GITHUB_OUTPUT"
 
       - name: Cache guest images and test binaries
         id: rootfs-cache
@@ -84,15 +86,7 @@ jobs:
         if: steps.rootfs-cache.outputs.cache-hit != 'true'
         run: |
           just build-all-rootfs
-          # Rust 1.98 links no static PIE for arm64, so the Rust test
-          # programs come from the 1.99 beta, pinned by date: the beta
-          # channel moved on to 1.100, whose wasip2 programs exit with
-          # their own status rather than 1.  Drop this (and "rust199beta"
-          # in the cache key) once 1.99 is stable and rust-toolchain.toml
-          # names it.  ("muslaot": the .NET AOT test programs moved to a
-          # musl toolchain, invalidating earlier entries.)
-          rustup toolchain install beta-2026-09-27 --profile minimal
-          RUSTUP_TOOLCHAIN=beta-2026-09-27 just build-test-bins
+          just build-test-bins
 
       # For the test jobs: an artifact, since a macOS runner cannot restore
       # a cache entry Linux saved without zstd, which the self-hosted Macs

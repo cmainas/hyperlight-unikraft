@@ -1,5 +1,8 @@
 # Pinned so every machine and CI runner builds, lints and formats with the
 # same compiler.  Bump deliberately (clippy gains lints between releases).
+# just build-rootfs builds drivers/wasmtime with it too.
+# From 1.100, wasm32-wasip2 programs exit with their own status rather than
+# 1, which tests/wasmtime.rs expects of a failing WASI 0.2 component.
 [toolchain]
-channel = "1.98.0"
+channel = "1.99.0"
 components = ["clippy", "rustfmt"]
