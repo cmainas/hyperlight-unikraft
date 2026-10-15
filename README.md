@@ -44,6 +44,16 @@ hyperlight-unikraft runs on **Linux** (KVM, or MSHV with `cargo build --features
 
 Guest runtimes include **Python**, **Node.js**, **.NET** (JIT and AOT), **Java**, **Bash**, **Go**, **Rust**, **C**, **PowerShell**, **QuickJS** and **Wasmtime** (WebAssembly modules and components under WASI). The quickjs, node, python, dotnet-jit, java and wasmtime images also take guest function calls (a handler defined once, called many times with JSON in and out) and make host function calls to functions you provide, like [hyperlight-js](https://github.com/hyperlight-dev/hyperlight-js) and [hyperlight-wasm](https://github.com/hyperlight-dev/hyperlight-wasm); see [`docs/calls.md`](docs/calls.md). Two are Python variants with a BusyBox shell: **python-shell** (Python + a shell; a general base other images build on) and **agent** (python-shell plus preloaded data-science packages like numpy, pandas, scipy, scikit-learn, which are commonly used for agent code-executors). Any Python guest with `--net` can also `pip install` packages on demand from inside the guest (see [`examples/agent/pip_install.py`](examples/agent/pip_install.py)). See [support tiers](docs/guest-support-tiers.md) for the guarantee behind each; `just list-runtimes` prints the current set.
 
+python-shell can also boot into the shell rather than the Python driver, with `--entry` (`--guest-exec` runs its file with Python). The mount puts your files in the guest, and an entry point starts with `PATH=/bin` while `python3` lives in `/usr/local/bin`, so set `PATH` or call `/usr/local/bin/python3`:
+
+| To | Run |
+|----|-----|
+| Run Python through the shell | `hluk run --runtime python-shell --mount .:/mnt/app:ro --env PATH=/usr/local/bin:/bin --entry "/bin/sh -c 'python3 /mnt/app/main.py'"` |
+| Run a shell script | `hluk run --runtime python-shell --mount .:/mnt/app:ro --env PATH=/usr/local/bin:/bin --entry "/bin/sh /mnt/app/script.sh"` |
+| Open a shell REPL on stdin (Ctrl-D leaves) | `hluk run --runtime python-shell --mount .:/mnt/app:ro --env PATH=/usr/local/bin:/bin --entry /bin/sh` |
+
+The shell is BusyBox's hush, not bash: POSIX scripts, pipes and `$(...)` work, bash arrays and `[[ ]]` do not.
+
 ## Examples
 
 Guest scripts under `examples/` run with `hluk run` (or `just run <runtime> <script>`):
