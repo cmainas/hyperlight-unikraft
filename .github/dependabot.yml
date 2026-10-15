@@ -1,0 +1,98 @@
+# Grouped version updates once a month, each group one pull request across
+# its directories. Outside the wasmtime group, a cargo or action major comes
+# on its own, one per directory. Anything that has to move in step with
+# something Dependabot cannot see is left out and bumped by hand. Cargo and
+# action security updates still come, listed directories or not; Docker has
+# none.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    # Each has its own Cargo.lock: there is no workspace. demos/pptx-gen is
+    # left out: CI does not build it.
+    directories:
+      - /
+      - /drivers/wasmtime/driver
+      - /examples/wasmtime/calculator
+      - /examples/wasmtime/hello-p3
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    labels: [dependencies]
+    groups:
+      # wasmtime and wasmtime-wasi share a version, wasmparser and wat
+      # follow it, and the guest crates target the WASI it runs.
+      wasmtime:
+        patterns: [wasmtime, wasmtime-*, wasmparser, wat, wit-bindgen, wasip3]
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      # A new Hyperlight is a port, host and kernel together (see #142).
+      - dependency-name: hyperlight-*
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    labels: [dependencies]
+    groups:
+      actions:
+        patterns: ["*"]
+        # A new typos release brings new words to fix: on its own, so it
+        # holds up no other action.
+        exclude-patterns: [crate-ci/typos]
+        update-types: [minor, patch]
+
+  # Digest refreshes and patch releases only: a new minor or major tag
+  # (python 3.13, alpine 3.21, dotnet 10) changes what a rootfs ships and
+  # where (the python images copy /usr/local/lib/python3.12).
+  - package-ecosystem: docker
+    directories:
+      - /conformance/python
+      - /demos/pptx-gen
+      - /drivers
+      - /drivers/agent
+      - /drivers/bash
+      - /drivers/c
+      - /drivers/dotnet-aot
+      - /drivers/dotnet-jit
+      - /drivers/go
+      - /drivers/java
+      - /drivers/node
+      - /drivers/powershell
+      - /drivers/python
+      - /drivers/python-shell
+      - /drivers/quickjs
+      - /drivers/rust
+      - /drivers/wasmtime
+      - /examples/agent-framework
+      - /examples/agent/custom
+      - /examples/http-server/express
+      - /examples/http-server/flask
+      - /examples/http-server/kestrel
+      - /kernel
+      - /templates/http-dotnet
+      - /templates/http-node
+      - /templates/http-python
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    labels: [dependencies]
+    groups:
+      images:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      # The same Rust as rust-toolchain.toml; bumped with it.
+      - dependency-name: rust
+      # The amd64 image must stay the release the arm64 stage downloads
+      # (PWSH_VERSION in drivers/powershell/Dockerfile).
+      - dependency-name: powershell
+      # Built locally by `just build-rootfs`, not pulled.
+      - dependency-name: hluk-*
