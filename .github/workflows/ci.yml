@@ -548,9 +548,99 @@ jobs:
     if: always()
     needs: [lint, lint-arm64, typos, kernel-verify, rootfs, test, static-linux, demos, conformance, bench]
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      actions: read
+      pull-requests: read
     steps:
       - name: Verify all jobs passed
         run: |
           jq --exit-status 'all(.result == "success")' \
             <<< '${{ toJson(needs) }}'
+
+      # A pull request labelled ci/arm64 also needs its arm64 run to pass. The
+      # labels are read once, when this step starts: a label added later gates
+      # nothing until the job is re-run. The run that counts is the latest
+      # started (a re-run restarts one) for the commit that did not skip (runs
+      # for other labels, for a fork's pushes, or from before the label skip
+      # everything); one awaiting approval, then one cancelled, counts only
+      # when no other does. It is done here, not as a job in arm64.yml,
+      # because the newest check of a name is the one that counts, and a
+      # skipped run's would pass.
+      - name: Wait for the arm64 run
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          for try in 1 2 3; do
+            labels=$(gh pr view "$PR" --json labels -q '.labels[].name') && break
+            [ "$try" -lt 3 ] || { echo "::error::Reading the labels failed."; exit 1; }
+            sleep 20
+          done
+          if ! grep -qx ci/arm64 <<< "$labels"; then
+            echo "Not labelled ci/arm64: no arm64 run needed."
+            exit 0
+          fi
+          rerun="then re-run this job (re-running arm64 alone leaves it failed)"
+          [ "$FORK" = true ] && no_run_limit=600 || no_run_limit=1800
+          started=$SECONDS
+          failures=0
+          while :; do
+            # Not push: main's runs of the commit, once it is merged, get
+            # cancelled by later pushes. A run started by hand counts.
+            if run=$(gh api "repos/$GH_REPO/actions/workflows/arm64.yml/runs?head_sha=$SHA&per_page=100" \
+                       -q '[.workflow_runs[] | select(.event != "push" and .conclusion != "skipped")]
+                           | sort_by([(.conclusion | if . == "cancelled" then 0 elif . == "action_required" then 1 else 2 end),
+                                      .run_started_at, .id])
+                           | last // empty
+                           | "\(.status) \(.conclusion // "none") \(.html_url)"'); then
+              failures=0
+              if [ -n "$run" ]; then
+                read -r status conclusion url <<< "$run"
+                case "$status $conclusion" in
+                  "completed success") echo "arm64 run passed: $url"; exit 0 ;;
+                  "completed action_required") echo "Waiting for the arm64 run's approval: $url" ;;
+                  "completed startup_failure")
+                    echo "::error::arm64.yml did not start, $url: fix the workflow file."
+                    exit 1 ;;
+                  completed*)
+                    echo "::error::arm64 run: $conclusion, $url. Re-run it, $rerun."
+                    exit 1 ;;
+                  *) echo "Waiting for the arm64 run ($status): $url" ;;
+                esac
+                # Closed unmerged only: a merged one's check should still
+                # say what arm64 found.
+                if [ "$(gh pr view "$PR" --json state -q .state || echo OPEN)" = CLOSED ]; then
+                  echo "The pull request is closed: no arm64 run needed."
+                  exit 0
+                fi
+              elif [ $((SECONDS - started)) -gt "$no_run_limit" ]; then
+                # A fork's pull request runs arm64 when labelled, not on its
+                # later pushes (see arm64.yml), so soon there will be none;
+                # one of this repository's always gets a run, if late.
+                echo "::error::No arm64 run tests $SHA: remove and re-add the ci/arm64 label, $rerun."
+                exit 1
+              else
+                echo "No arm64 run for $SHA yet."
+              fi
+            else
+              # API errors are retried, for over an hour in a row, so that a
+              # spent rate limit can reset.
+              failures=$((failures + 1))
+              if [ "$failures" -ge 35 ]; then
+                echo "::error::Listing the arm64 runs failed $failures times in a row."
+                exit 1
+              fi
+              echo "::warning::Listing the arm64 runs failed; trying again."
+            fi
+            # Just short of the job's 360 minutes, so that the message says
+            # what to do.
+            if [ $((SECONDS - started)) -gt $((350 * 60)) ]; then
+              echo "::error::Gave up waiting for the arm64 run: re-run this job once it passes."
+              exit 1
+            fi
+            sleep 120
+          done
