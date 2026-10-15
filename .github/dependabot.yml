@@ -3,7 +3,9 @@
 # on its own, one per directory. Anything that has to move in step with
 # something Dependabot cannot see is left out and bumped by hand. Cargo and
 # action security updates still come, listed directories or not; Docker has
-# none.
+# none. The pull requests for the directories below are labelled ci/arm64
+# too, so the arm64 tests run on them and ci-passed waits for those before
+# they can be merged.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -18,7 +20,7 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
-    labels: [dependencies]
+    labels: [dependencies, ci/arm64]
     groups:
       # wasmtime and wasmtime-wasi share a version, wasmparser and wat
       # follow it, and the guest crates target the WASI it runs.
@@ -38,7 +40,7 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
-    labels: [dependencies]
+    labels: [dependencies, ci/arm64]
     groups:
       actions:
         patterns: ["*"]
@@ -83,7 +85,7 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
-    labels: [dependencies]
+    labels: [dependencies, ci/arm64]
     groups:
       images:
         patterns: ["*"]

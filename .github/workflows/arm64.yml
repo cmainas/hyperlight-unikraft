@@ -5,8 +5,9 @@ name: arm64
 # runners (Linux/KVM and macOS/Hypervisor.framework), which hosted runners
 # cannot stand in for.  Those runners are few and shared with hyperlight, so
 # this runs on main, on demand, and on pull requests labelled ci/arm64 (only
-# maintainers can label); ci-passed waits for this run on those already
-# labelled when ci-passed starts.  A pull request from a fork runs when it is
+# maintainers can label, and Dependabot labels its version updates, see
+# dependabot.yml); ci-passed waits for this run on those already labelled
+# when ci-passed starts.  A pull request from a fork runs when it is
 # labelled, not on its later pushes: remove and re-add the label to test new
 # commits.  That keeps honest runs deliberate; it is no security boundary,
 # since a fork's pull request brings its own copy of this file.  Outside
