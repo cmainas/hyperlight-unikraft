@@ -32,7 +32,9 @@ Then the package:
 pip install smolagents-hyperlight
 ```
 
-The first run pulls the `agent` image of your `hluk` release (`ghcr.io/hyperlight-dev/hyperlight-unikraft/agent:initrd-v<version>`, about 400 MB) and saves its warm snapshot; later sandboxes start in milliseconds. The image ships CPython 3.12 with numpy, pandas, scipy, scikit-learn, matplotlib, pillow and requests.
+The first run pulls the `agent` image of your `hluk` release (`ghcr.io/hyperlight-dev/hyperlight-unikraft/agent:initrd-v<version>`, about 400 MB) and saves a warm snapshot of it booted; every sandbox after that, a `reset()` included, starts from the snapshot in milliseconds. The image ships CPython 3.12 with numpy, pandas, scipy, scikit-learn, matplotlib, pillow and requests.
+
+Both stay in `hluk`'s cache: `$HLUK_CACHE_DIR` if set, else `~/.cache/hluk` on Linux and macOS and `%LOCALAPPDATA%\hluk\cache` on Windows. A snapshot of the `agent` image takes about 800 MB, and one is saved for each `hluk` version, image and memory size (`scratch_mb`); nothing removes old ones, so after upgrading `hluk`, `hluk cache ls` lists them and `hluk cache clean --snapshots` removes them.
 
 ## Use
 
@@ -44,13 +46,17 @@ with CodeAgent(model=InferenceClientModel(), tools=[], executor=HyperlightExecut
     agent.run("Use numpy to compute the 20th Fibonacci number via matrix power")
 ```
 
-The package also registers the executor under the `smolagents.executors` entry points, for smolagents [#2724](https://github.com/huggingface/smolagents/pull/2724), which is not in a release yet. A smolagents with it creates the executor by name, with `executor_kwargs` as its arguments and the agent's `additional_authorized_imports` installed in the guest:
+To have packages installed in the guest, pass them: `HyperlightExecutor(additional_imports=["sympy"], net_allow=["pypi.org", "files.pythonhosted.org"])`. Packages already in the image are not installed again, and need no network.
+
+### By name, with `executor_type`
+
+smolagents picks its built-in executors by name, with `executor_type`. An open smolagents pull request, [#2724](https://github.com/huggingface/smolagents/pull/2724), lets installed packages add their own names, and this package adds `hyperlight`. Once a smolagents release includes it, you can write:
 
 ```python
 CodeAgent(model=model, tools=[], executor_type="hyperlight", executor_kwargs={"net_allow": ["pypi.org"]})
 ```
 
-With `executor=`, pass the packages to install yourself: `HyperlightExecutor(additional_imports=["sympy"], net_allow=["pypi.org", "files.pythonhosted.org"])`. Packages already in the image are not installed again, and need no network.
+smolagents then passes `executor_kwargs` to `HyperlightExecutor` and installs the agent's `additional_authorized_imports` in the guest. Until then, use `executor=` as above.
 
 ### Arguments
 
@@ -81,7 +87,7 @@ The executor starts `hluk run` as a child process, with a small Python script th
 
 - CI runs the tests in micro-VMs on Linux (KVM) and Windows (WHP). `hluk` supports Apple silicon Macs too, but the executor is not tested there yet.
 - One vCPU, and threads in the guest take turns rather than run at once.
-- The guest kernel keeps the memory of exited processes: a session that starts many heavy subprocesses runs out of memory after a while.
+- Memory used by a process started in the guest isn't fully freed when the process exits (a guest kernel bug): about 15 MiB per Python subprocess, `pip install` included. An agent that runs many subprocesses eventually runs out of memory; the guest is then restarted fresh and the agent's variables are lost.
 - Managed agents (`CodeAgent(managed_agents=...)`) are not supported, as with smolagents' other remote executors.
 
 ## Development
@@ -92,4 +98,4 @@ pytest                    # unit tests, and the guest's script run by a stand-in
 RUN_ALL=1 pytest          # also the tests in a real micro-VM, with the hluk on PATH
 ```
 
-`HLUK_PATH`, `HLUK_INITRD` and `HLUK_SCRATCH_MB` point the micro-VM tests at another `hluk` and image, as CI does with the repository's own build.
+By default the micro-VM tests use the `hluk` on `PATH` and its published `agent` image. To test a local build instead, set `HLUK_PATH` to its `hluk`, `HLUK_INITRD` to its agent rootfs, and `HLUK_SCRATCH_MB` to the guest memory that rootfs needs. CI does this so each commit is tested against its own build.
