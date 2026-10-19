@@ -1,0 +1,65 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-server-hyperlight"
+version = "0.1.0"
+description = "An MCP server that runs Python in a local Hyperlight micro-VM"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "The Hyperlight Authors" }]
+requires-python = ">=3.10"
+keywords = ["mcp", "model-context-protocol", "hyperlight", "unikraft", "sandbox", "micro-vm", "code-interpreter"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Security",
+]
+# MCPServer is mcp 2's name for FastMCP. The guest itself is smolagents-hyperlight's: the same executor, protocol and
+# bounds on what the guest sends back. CI tests each at its floor, and at its newest; those of anyio and pydantic are
+# mcp's own, and that of rich smolagents'.
+dependencies = [
+  "anyio>=4.9,<5",
+  "mcp>=2.0.0,<3",
+  "pydantic>=2.12,<3",
+  "rich>=13.9.4,<16",
+  "smolagents>=1.25,<2",
+  "smolagents-hyperlight>=0.1.1,<0.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "ruff>=0.17,<0.18"]
+
+[project.scripts]
+mcp-server-hyperlight = "mcp_server_hyperlight.server:main"
+
+[project.urls]
+Homepage = "https://github.com/hyperlight-dev/hyperlight-unikraft/tree/main/integrations/mcp"
+Repository = "https://github.com/hyperlight-dev/hyperlight-unikraft"
+Issues = "https://github.com/hyperlight-dev/hyperlight-unikraft/issues"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE"]
+# Hatchling adds the repository's .gitignore otherwise
+exclude = [".gitignore"]
+
+[tool.ruff]
+line-length = 119
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+known-first-party = ["mcp_server_hyperlight"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
