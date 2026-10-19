@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "smolagents-hyperlight"
+version = "0.1.0"
+description = "Run the code of smolagents' CodeAgent in a local Hyperlight micro-VM"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "The Hyperlight Authors" }]
+requires-python = ">=3.10"
+keywords = ["smolagents", "hyperlight", "unikraft", "sandbox", "micro-vm", "agents"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Security",
+]
+# The executor builds on smolagents' RemotePythonExecutor, so it is tested against the oldest and the newest release
+# this allows
+dependencies = ["smolagents>=1.25,<2"]
+
+[project.optional-dependencies]
+# numpy: the stand-in for hluk runs the guest's script with the host's Python, where the tests import it
+test = ["numpy", "pytest>=8", "ruff>=0.17,<0.18"]
+
+# Makes `CodeAgent(executor_type="hyperlight")` create a HyperlightExecutor, with a smolagents that loads executors
+# from this group (huggingface/smolagents#2724)
+[project.entry-points."smolagents.executors"]
+hyperlight = "smolagents_hyperlight:HyperlightExecutor"
+
+[project.urls]
+Homepage = "https://github.com/hyperlight-dev/hyperlight-unikraft/tree/main/integrations/smolagents"
+Repository = "https://github.com/hyperlight-dev/hyperlight-unikraft"
+Issues = "https://github.com/hyperlight-dev/hyperlight-unikraft/issues"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE"]
+# Hatchling adds the repository's .gitignore otherwise
+exclude = [".gitignore"]
+
+[tool.ruff]
+line-length = 119
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+known-first-party = ["smolagents_hyperlight"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
