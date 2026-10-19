@@ -49,7 +49,7 @@ jobs:
   # cfg paths (the arm64 kernel, BSD sockets and errno, WHP on arm64).
   # Hosted runners can run no guest there (no HVF, no /dev/kvm, no nested
   # Hyper-V), so only what needs no VM runs; arm64.yml boots the guests
-  # on macOS and Linux.  Guests do not boot on Windows arm64 yet (#166).
+  # on macOS, Linux and Windows.
   lint-arm64:
     strategy:
       fail-fast: false

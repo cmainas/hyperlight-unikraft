@@ -2,17 +2,17 @@ name: arm64
 
 # Guests on arm64: the images and test binaries built on a hosted arm64
 # runner, then the integration tests on hyperlight-dev's self-hosted arm64
-# runners (Linux/KVM and macOS/Hypervisor.framework), which hosted runners
-# cannot stand in for.  Those runners are few and shared with hyperlight, so
-# this runs on main, on demand, and on pull requests labelled ci/arm64 (only
-# maintainers can label, and Dependabot labels its version updates, see
-# dependabot.yml); ci-passed waits for this run on those already labelled
-# when ci-passed starts.  A pull request from a fork runs when it is
-# labelled, not on its later pushes: remove and re-add the label to test new
-# commits.  That keeps honest runs deliberate; it is no security boundary,
-# since a fork's pull request brings its own copy of this file.  Outside
-# code is kept off the runners by the setting that requires approval before
-# a fork's workflows run.
+# runners (Linux/KVM, macOS/Hypervisor.framework and Windows/WHP), which
+# hosted runners cannot stand in for.  Those runners are few and shared
+# with hyperlight, so this runs on main, on demand, and on pull requests
+# labelled ci/arm64 (only maintainers can label, and Dependabot labels its
+# version updates, see dependabot.yml); ci-passed waits for this run on
+# those already labelled when ci-passed starts.  A pull request from a
+# fork runs when it is labelled, not on its later pushes: remove and re-add
+# the label to test new commits.  That keeps honest runs deliberate; it is
+# no security boundary, since a fork's pull request brings its own copy of
+# this file.  Outside code is kept off the runners by the setting that
+# requires approval before a fork's workflows run.
 on:
   workflow_dispatch:
   push:
@@ -117,8 +117,8 @@ jobs:
           # The Linux runner is a small VM (2 CPUs, 3 GB) whose guests run
           # under nested virtualization: a large guest there takes 10-20
           # minutes per test.  It runs the suites with small guests; macOS
-          # runs everything, the agent, node, .NET JIT and PowerShell
-          # suites included.
+          # and Windows run everything, the agent, node, .NET JIT and
+          # PowerShell suites included.
           - os: linux
             runner: [self-hosted, Linux, arm64, kvm]
             targets: >-
@@ -129,6 +129,18 @@ jobs:
           - os: macos
             runner: [self-hosted, macos, arm64, hvf]
             targets: --all-targets
+          # A 1ES pool, which wants a JobId label unique to each job, as in
+          # hyperlight's dep_build_test.yml.  As many tests at a time as
+          # `just test` runs on Windows.
+          - os: windows
+            runner:
+              - self-hosted
+              - Windows
+              - ARM64
+              - 1ES.Pool=hl-windows-arm
+              - JobId=test-arm64-windows-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
+            targets: --all-targets
+            threads: 4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -136,11 +148,25 @@ jobs:
       # rust-toolchain.toml pins, as hyperlight's jobs do.
       - name: Rust toolchain version
         id: rust
+        shell: bash
         run: echo "toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ steps.rust.outputs.toolchain }}
+
+      # ring compiles its C with clang, not cl.exe, on Windows arm64: use
+      # Visual Studio's, as hyperlight's jobs on these runners do (they
+      # find it through VSINSTALLDIR; vswhere needs no developer shell).
+      - name: Put Visual Studio's clang on the PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath
+          if (-not $vs) { throw "no Visual Studio with its clang component" }
+          $llvm = Join-Path $vs 'VC\Tools\Llvm\ARM64\bin'
+          if (-not (Test-Path (Join-Path $llvm 'clang.exe'))) { throw "no clang.exe in '$llvm'" }
+          $llvm >> $env:GITHUB_PATH
 
       - name: Fetch guest images and test binaries
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -150,8 +176,13 @@ jobs:
 
       # On macOS, cargo signs each test binary with the hypervisor
       # entitlement first and runs its tests one at a time
-      # (dev/macos-sign-and-run.sh).
+      # (dev/macos-sign-and-run.sh); in parallel, the Linux runner's nested
+      # guests ran past the hour.  On Windows, a small pool of WHP
+      # surrogate processes, spawned when needed, as `just test` sets up;
+      # the other hosts ignore those variables.
       - name: cargo test
         run: cargo test --locked ${{ matrix.targets }}
         env:
-          RUST_TEST_THREADS: 1
+          RUST_TEST_THREADS: ${{ matrix.threads || 1 }}
+          HYPERLIGHT_MAX_SURROGATES: 8
+          HYPERLIGHT_INITIAL_SURROGATES: 0
