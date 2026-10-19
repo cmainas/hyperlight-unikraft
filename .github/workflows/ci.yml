@@ -45,18 +45,21 @@ jobs:
         run: ./dev/check-license-headers.sh
 
   # ── arm64 hosts: build, lint and unit tests ─────────────────
-  # macOS (Hypervisor.framework) and Linux arm64 build different cfg paths
-  # (the arm64 kernel, BSD sockets and errno).  Hosted runners can run no
-  # guest there (no HVF, no /dev/kvm), so only what needs no VM runs.
+  # macOS (Hypervisor.framework), Linux and Windows arm64 build different
+  # cfg paths (the arm64 kernel, BSD sockets and errno, WHP on arm64).
+  # Hosted runners can run no guest there (no HVF, no /dev/kvm, no nested
+  # Hyper-V), so only what needs no VM runs; arm64.yml boots the guests
+  # on macOS and Linux.  Guests do not boot on Windows arm64 yet (#166).
   lint-arm64:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-24.04-arm]
+        os: [macos-latest, ubuntu-24.04-arm, windows-11-arm]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
-    timeout-minutes: 20
+    # Windows builds hyperlight-host's surrogate too, and links slower.
+    timeout-minutes: ${{ startsWith(matrix.os, 'windows') && 40 || 20 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -64,6 +67,11 @@ jobs:
         with:
           prefix-key: "v1-rust"
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # As in the test job: the cache can lose hyperlight-host's surrogate.
+      - name: Rebuild hyperlight-host on Windows (regenerate the RustEmbed surrogate)
+        if: runner.os == 'Windows'
+        run: cargo clean -p hyperlight-host
 
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -212,7 +220,7 @@ jobs:
           cargo clean -p hyperlight-host
           cargo clean -p hyperlight-host --release
 
-      # The Windows code paths only compile here; lint them here too.
+      # The x64 Windows code paths only compile here; lint them here too.
       - name: cargo clippy
         if: runner.os == 'Windows'
         run: cargo clippy --all-targets --locked -- -D warnings
