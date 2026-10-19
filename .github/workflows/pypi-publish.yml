@@ -1,0 +1,83 @@
+# Publish `smolagents-hyperlight` (integrations/smolagents) to PyPI. Manual;
+# a dry run unless `dry_run` is set to false, and only from main. The version
+# is the one in its pyproject.toml, released on its own schedule rather than
+# with hluk's.
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and check without publishing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds without the token: only the publish job below can mint one.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The build runs the build backend's code: leave it no token
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Refuse to publish from another branch
+        if: ${{ !inputs.dry_run && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::smolagents-hyperlight is published from main only"
+          exit 1
+
+      # Only a warning: the upload skips the files PyPI has, so a run after
+      # one that uploaded part of a version uploads the rest
+      - name: Check version not already published
+        working-directory: integrations/smolagents
+        run: |
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          if curl -sf "https://pypi.org/pypi/smolagents-hyperlight/$VERSION/json" > /dev/null; then
+            echo "::warning::smolagents-hyperlight $VERSION is already on PyPI"
+          fi
+
+      - name: Build
+        working-directory: integrations/smolagents
+        run: |
+          # Bumped by hand: Dependabot does not read workflow run lines
+          python -m pip install build==1.6.1 twine==7.0.0
+          python -m build
+          python -m twine check --strict dist/*
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: integrations/smolagents/dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: ${{ !inputs.dry_run && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    # PyPI's trusted publisher for the project names this workflow and
+    # environment, so only this job can upload.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/smolagents-hyperlight/
+    permissions:
+      id-token: write # PyPI trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          # What a version already has on PyPI is left as it is
+          skip-existing: true
