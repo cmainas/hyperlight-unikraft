@@ -1,12 +1,13 @@
 # Releasing
 
-Releases are driven by the `version` in the root `Cargo.toml` and cut with three workflows in `.github/workflows/`:
+`hluk` releases are driven by the `version` in the root `Cargo.toml` and cut with the workflows in `.github/workflows/`; `smolagents-hyperlight` is released on its own (see [PyPI](#pypi)):
 
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `release.yml` | manual (`workflow_dispatch`) | Tags the version, creates a GitHub Release (notes from the matching `CHANGELOG.md` section) with the `hluk` binaries, and triggers the GHCR publish. |
 | `publish-images.yml` | git tag `v*`, or manual | Pushes each runtime as one package (`:latest` base + `:initrd` cpio), plus busybox, the kernel, and the urunc "hello" image to GHCR. |
 | `cargo-publish.yml` | manual | Publishes the `hyperlight-unikraft` crate to crates.io. Dry-run by default. |
+| `pypi-publish.yml` | manual, from `main` | Publishes `smolagents-hyperlight` (`integrations/smolagents/`) to PyPI. Dry-run by default. |
 | `dev.yml` | `main`'s CI passing on a push, or manual (from `main`) | Replaces the `dev` pre-release and publishes the commit's `:dev-<sha7>` images (see [Dev builds](#dev-builds)). |
 
 User-facing changes are recorded in [`CHANGELOG.md`](../CHANGELOG.md) (Keep a Changelog format): changes accumulate under `## [Prerelease] - Unreleased`, then that heading is renamed to the version at release time.
@@ -53,3 +54,9 @@ The images go up before the binaries, so a dev binary never names images that ar
 ## crates.io
 
 `hyperlight-unikraft` and `hluk` are the same crate (one `[[bin]]`), so this is a single `cargo publish`. Run **Publish to crates.io** manually; it's a dry run unless you set `dry_run = false`.
+
+## PyPI
+
+`smolagents-hyperlight`, the smolagents executor in [`integrations/smolagents/`](../integrations/smolagents/), has a version of its own, in its `pyproject.toml`: it runs any `hluk` from v0.18.0 on, so it is released when it changes rather than with each `hluk` release. To release it, bump that `version` on `main`, then run **Publish to PyPI** with `dry_run = false`. The `build` job builds the sdist and wheel and checks them; the `publish` job uploads them with PyPI trusted publishing, so no token is stored. Files a version already has on PyPI are skipped, so a run after one that failed part way uploads the rest.
+
+Trusted publishing needs, once: the `smolagents-hyperlight` project on PyPI with this repository, `pypi-publish.yml` and the `pypi` environment as its trusted publisher (before the first release, a pending publisher, which also reserves the name), and that `pypi` environment in the repository's settings, limited to the `main` branch, where required reviewers can gate each upload. Nothing tags what was published: the version in `pyproject.toml` on `main` at the time of the run is what PyPI has.

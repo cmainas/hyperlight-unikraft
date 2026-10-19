@@ -68,6 +68,10 @@ Larger, self-contained demos live under `demos/`, each with its own `Justfile` a
 - `demos/pptx-gen/` — LLM-written `python-pptx` code run in a sandbox to build a `.pptx`.
 - `demos/urunc/` — deploy a guest through [urunc](https://github.com/urunc-dev/urunc) and containerd.
 
+## Integrations
+
+- **[smolagents](https://github.com/huggingface/smolagents)** — [`integrations/smolagents/`](integrations/smolagents/) is `smolagents-hyperlight`, released to PyPI: a code executor that runs a `CodeAgent`'s code in a micro-VM, with no network unless allowed, ready in about 40 ms on Linux with KVM (`CodeAgent(..., executor=HyperlightExecutor())`).
+
 ## How it works
 
 1. **Load** — `hluk` embeds the Unikraft elfloader kernel and maps a rootfs CPIO (the guest userland) as the initrd.

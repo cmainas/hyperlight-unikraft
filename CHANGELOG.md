@@ -4,6 +4,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Prerelease] - Unreleased
 
+### Added
+
+- `smolagents-hyperlight` (`integrations/smolagents/`): a [smolagents](https://github.com/huggingface/smolagents) code executor that runs a `CodeAgent`'s code in a micro-VM through `hluk run`, published to PyPI on its own version by `pypi-publish.yml`. The guest reads each step from its console and answers on it, so it needs no network, and has none unless hosts are allowed (`net_allow`); between steps its micro-VM is paused. It registers under the `smolagents.executors` entry points, so a smolagents that loads executors from them (huggingface/smolagents#2724, not in a release yet) takes `executor_type="hyperlight"`. CI tests it with each commit's `hluk` and `agent` image, in micro-VMs on Linux and Windows, against the oldest smolagents it allows on the oldest Python, and the newest.
+
 ## [v0.18.0]
 
 ### Added
