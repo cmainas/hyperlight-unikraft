@@ -1,13 +1,13 @@
 # Releasing
 
-`hluk` releases are driven by the `version` in the root `Cargo.toml` and cut with the workflows in `.github/workflows/`; `smolagents-hyperlight` is released on its own (see [PyPI](#pypi)):
+`hluk` releases are driven by the `version` in the root `Cargo.toml` and cut with the workflows in `.github/workflows/`; the Python packages in `integrations/`, `smolagents-hyperlight` and `mcp-server-hyperlight`, are released on their own (see [PyPI](#pypi)):
 
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `release.yml` | manual (`workflow_dispatch`) | Tags the version, creates a GitHub Release (notes from the matching `CHANGELOG.md` section) with the `hluk` binaries, and triggers the GHCR publish. |
 | `publish-images.yml` | git tag `v*`, or manual | Pushes each runtime as one package (`:latest` base + `:initrd` cpio), plus busybox, the kernel, and the urunc "hello" image to GHCR. |
 | `cargo-publish.yml` | manual | Publishes the `hyperlight-unikraft` crate to crates.io. Dry-run by default. |
-| `pypi-publish.yml` | manual, from `main` | Publishes `smolagents-hyperlight` (`integrations/smolagents/`) to PyPI. Dry-run by default. |
+| `pypi-publish.yml` | manual, from `main` | Publishes `smolagents-hyperlight` (`integrations/smolagents/`) or `mcp-server-hyperlight` (`integrations/mcp/`) to PyPI. Dry-run by default. |
 | `dev.yml` | `main`'s CI passing on a push, or manual (from `main`) | Replaces the `dev` pre-release and publishes the commit's `:dev-<sha7>` images (see [Dev builds](#dev-builds)). |
 
 User-facing changes are recorded in [`CHANGELOG.md`](../CHANGELOG.md) (Keep a Changelog format): changes accumulate under `## [Prerelease] - Unreleased`, then that heading is renamed to the version at release time.
@@ -57,6 +57,6 @@ The images go up before the binaries, so a dev binary never names images that ar
 
 ## PyPI
 
-`smolagents-hyperlight`, the smolagents executor in [`integrations/smolagents/`](../integrations/smolagents/), has a version of its own, in its `pyproject.toml`: it runs any `hluk` from v0.18.0 on, so it is released when it changes rather than with each `hluk` release. To release it, bump that `version` on `main`, then run **Publish to PyPI** with `dry_run = false`. The `build` job builds the sdist and wheel and checks them; the `publish` job uploads them with PyPI trusted publishing, so no token is stored. Files a version already has on PyPI are skipped, so a run after one that failed part way uploads the rest.
+Two packages are published to PyPI: `smolagents-hyperlight`, the smolagents executor in [`integrations/smolagents/`](../integrations/smolagents/), and `mcp-server-hyperlight`, the MCP server in [`integrations/mcp/`](../integrations/mcp/), which runs its guest through `smolagents-hyperlight`. Each has a version of its own, in its `pyproject.toml`: both run any `hluk` from v0.18.0 on, so each is released when it changes rather than with each `hluk` release. To release one, bump its `version` on `main`, then run **Publish to PyPI** with its `package` and `dry_run = false`. A change to `smolagents-hyperlight` that the MCP server needs is released first, and the server's dependency on it raised. The `build` job builds the sdist and wheel and checks them; the `publish` job uploads them with PyPI trusted publishing, so no token is stored. Files a version already has on PyPI are skipped, so a run after one that failed part way uploads the rest.
 
-Trusted publishing needs, once: the `smolagents-hyperlight` project on PyPI with this repository, `pypi-publish.yml` and the `pypi` environment as its trusted publisher (before the first release, a pending publisher, which also reserves the name), and that `pypi` environment in the repository's settings, limited to the `main` branch, where required reviewers can gate each upload. The workflow does not tag what it published: after an upload, tag the commit it ran on with `smolagents-hyperlight-v<version>` (a tag only, not a GitHub release, which would take the `Latest` release from `hluk`).
+Trusted publishing needs, once for each package: its project on PyPI with this repository, `pypi-publish.yml` and the `pypi` environment as its trusted publisher (before the first release, a pending publisher, which also reserves the name), and that `pypi` environment in the repository's settings, limited to the `main` branch, where required reviewers can gate each upload. The workflow does not tag what it published: after an upload, tag the commit it ran on with `<package>-v<version>`, such as `mcp-server-hyperlight-v0.1.0` (a tag only, not a GitHub release, which would take the `Latest` release from `hluk`).

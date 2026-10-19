@@ -71,6 +71,7 @@ Larger, self-contained demos live under `demos/`, each with its own `Justfile` a
 ## Integrations
 
 - **[smolagents](https://github.com/huggingface/smolagents)** — [`integrations/smolagents/`](integrations/smolagents/) is `smolagents-hyperlight`, released to PyPI: a code executor that runs a `CodeAgent`'s code in a micro-VM, with no network unless allowed, ready in about 40 ms on Linux with KVM (`CodeAgent(..., executor=HyperlightExecutor())`).
+- **[MCP](https://modelcontextprotocol.io)** — [`integrations/mcp/`](integrations/mcp/) is `mcp-server-hyperlight`, released to PyPI: an MCP server whose `run_python` tool runs Python in a micro-VM that keeps its state between calls, for Claude Code, Claude Desktop, VS Code, Cursor and other MCP clients (`claude mcp add hyperlight -- uvx mcp-server-hyperlight`).
 
 ## How it works
 
