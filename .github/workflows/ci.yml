@@ -354,12 +354,14 @@ jobs:
       - name: Run demo
         run: just demos ${{ matrix.demo }}
 
-  # ── smolagents integration ─────────────────────────────────
-  # integrations/smolagents (the smolagents-hyperlight package) with this
-  # commit's hluk and agent image, its micro-VM tests included, against the
-  # oldest smolagents it allows and the newest.
-  smolagents:
-    name: smolagents (${{ matrix.os }}, ${{ matrix.smolagents }} smolagents, Python ${{ matrix.python }})
+  # ── Integrations ───────────────────────────────────────────
+  # The Python packages in integrations/, smolagents-hyperlight (smolagents)
+  # and mcp-server-hyperlight (mcp), with this commit's hluk and agent image,
+  # their micro-VM tests included, against the oldest release of the library
+  # each builds on and the newest. The MCP server runs its guest through
+  # this commit's smolagents-hyperlight.
+  integrations:
+    name: ${{ matrix.package }} (${{ matrix.os }}, ${{ matrix.deps }} ${{ matrix.package }}, Python ${{ matrix.python }})
     needs: rootfs
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -368,17 +370,31 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # By their directories under integrations/, rather than their PyPI
+        # names, as every step runs in one
+        package: [smolagents, mcp]
         os: [linux, windows]
-        smolagents: [oldest, newest]
+        deps: [oldest, newest]
         include:
           - os: linux
             runner: ubuntu-latest
           - os: windows
             runner: windows-latest
-          # The oldest smolagents on the oldest Python the package allows
-          - smolagents: oldest
+          # The libraries each package builds on, tested at the floors its
+          # pyproject.toml gives them on the oldest leg
+          - package: smolagents
+            floors: smolagents
+          - package: mcp
+            floors: mcp smolagents-hyperlight smolagents anyio pydantic rich
+          # This commit's smolagents-hyperlight, which the MCP server runs its
+          # guest through; the oldest leg has the release it allows from PyPI
+          - package: mcp
+            deps: newest
+            requires: -e ../smolagents
+          # The oldest library on the oldest Python the package allows
+          - deps: oldest
             python: "3.10"
-          - smolagents: newest
+          - deps: newest
             python: "3.12"
     defaults:
       run:
@@ -421,25 +437,37 @@ jobs:
         run: cargo build --release --locked
 
       - name: Install the package
-        working-directory: integrations/smolagents
+        working-directory: integrations/${{ matrix.package }}
+        env:
+          FLOORS: ${{ matrix.floors }}
         run: |
-          python -m pip install -e '.[test]'
-          if [ "${{ matrix.smolagents }}" = oldest ]; then
-            oldest=$(sed -n 's/.*"smolagents>=\([0-9.]*\),.*/\1/p' pyproject.toml)
-            python -m pip install "smolagents==$oldest"
+          python -m pip install ${{ matrix.requires }} -e '.[test]'
+          if [ "${{ matrix.deps }}" = oldest ]; then
+            pins=
+            for library in $FLOORS; do
+              oldest=$(sed -n "s/.*\"$library>=\([0-9.]*\),.*/\1/p" pyproject.toml)
+              if [ -z "$oldest" ]; then
+                echo "::error::pyproject.toml gives $library no floor"
+                exit 1
+              fi
+              pins="$pins $library==$oldest"
+            done
+            python -m pip install $pins
           fi
-          python -m pip show smolagents | grep '^Version'
+          for library in $FLOORS; do
+            echo "$library $(python -m pip show "$library" | sed -n 's/^Version: //p')"
+          done
 
       - name: Lint
-        if: matrix.os == 'linux' && matrix.smolagents == 'newest'
-        working-directory: integrations/smolagents
+        if: matrix.os == 'linux' && matrix.deps == 'newest'
+        working-directory: integrations/${{ matrix.package }}
         # Pinned, so that a new ruff release fails no commit that did not change
         run: |
           python -m pip install ruff==0.17.1
           ruff check . && ruff format --check .
 
       - name: Test
-        working-directory: integrations/smolagents
+        working-directory: integrations/${{ matrix.package }}
         env:
           RUN_ALL: "1"
           HLUK_PATH: ${{ github.workspace }}/target/release/hluk${{ runner.os == 'Windows' && '.exe' || '' }}
@@ -639,7 +667,7 @@ jobs:
   # ── Gate ──────────────────────────────────────────────────────
   ci-passed:
     if: always()
-    needs: [lint, lint-arm64, typos, kernel-verify, rootfs, test, static-linux, demos, smolagents, conformance, bench]
+    needs: [lint, lint-arm64, typos, kernel-verify, rootfs, test, static-linux, demos, integrations, conformance, bench]
     runs-on: ubuntu-latest
     permissions:
       actions: read
