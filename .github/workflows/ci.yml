@@ -354,6 +354,99 @@ jobs:
       - name: Run demo
         run: just demos ${{ matrix.demo }}
 
+  # ── smolagents integration ─────────────────────────────────
+  # integrations/smolagents (the smolagents-hyperlight package) with this
+  # commit's hluk and agent image, its micro-VM tests included, against the
+  # oldest smolagents it allows and the newest.
+  smolagents:
+    name: smolagents (${{ matrix.os }}, ${{ matrix.smolagents }} smolagents, Python ${{ matrix.python }})
+    needs: rootfs
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+        smolagents: [oldest, newest]
+        include:
+          - os: linux
+            runner: ubuntu-latest
+          - os: windows
+            runner: windows-latest
+          # The oldest smolagents on the oldest Python the package allows
+          - smolagents: oldest
+            python: "3.10"
+          - smolagents: newest
+            python: "3.12"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: "v1-rust"
+          # The key names the job, so only this job's own saves restore here
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Restore guest images
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build-elfloader
+          key: ${{ needs.rootfs.outputs.cache-key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Enable KVM
+        if: runner.os == 'Linux'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+
+      - name: Rebuild hyperlight-host on Windows (regenerate the RustEmbed surrogate)
+        # As in the test job: a cached build can lack hyperlight_surrogate.exe.
+        if: runner.os == 'Windows'
+        run: cargo clean -p hyperlight-host --release
+
+      - name: Build hluk
+        run: cargo build --release --locked
+
+      - name: Install the package
+        working-directory: integrations/smolagents
+        run: |
+          python -m pip install -e '.[test]'
+          if [ "${{ matrix.smolagents }}" = oldest ]; then
+            oldest=$(sed -n 's/.*"smolagents>=\([0-9.]*\),.*/\1/p' pyproject.toml)
+            python -m pip install "smolagents==$oldest"
+          fi
+          python -m pip show smolagents | grep '^Version'
+
+      - name: Lint
+        if: matrix.os == 'linux' && matrix.smolagents == 'newest'
+        working-directory: integrations/smolagents
+        # Pinned, so that a new ruff release fails no commit that did not change
+        run: |
+          python -m pip install ruff==0.17.1
+          ruff check . && ruff format --check .
+
+      - name: Test
+        working-directory: integrations/smolagents
+        env:
+          RUN_ALL: "1"
+          HLUK_PATH: ${{ github.workspace }}/target/release/hluk${{ runner.os == 'Windows' && '.exe' || '' }}
+          HLUK_INITRD: ${{ github.workspace }}/build-elfloader/agent-rootfs.cpio
+          HLUK_SCRATCH_MB: "1536"
+        run: python -m pytest -v
+
   # ── Conformance ──────────────────────────────────────────────
   conformance:
     name: conformance (${{ matrix.os }})
@@ -546,7 +639,7 @@ jobs:
   # ── Gate ──────────────────────────────────────────────────────
   ci-passed:
     if: always()
-    needs: [lint, lint-arm64, typos, kernel-verify, rootfs, test, static-linux, demos, conformance, bench]
+    needs: [lint, lint-arm64, typos, kernel-verify, rootfs, test, static-linux, demos, smolagents, conformance, bench]
     runs-on: ubuntu-latest
     permissions:
       actions: read
