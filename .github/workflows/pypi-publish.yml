@@ -1,12 +1,20 @@
-# Publish `smolagents-hyperlight` (integrations/smolagents) to PyPI. Manual;
-# a dry run unless `dry_run` is set to false, and only from main. The version
-# is the one in its pyproject.toml, released on its own schedule rather than
-# with hluk's.
+# Publish one of the Python packages in integrations/ to PyPI:
+# `smolagents-hyperlight` (integrations/smolagents) or `mcp-server-hyperlight`
+# (integrations/mcp). Manual; a dry run unless `dry_run` is set to false, and
+# only from main. The version is the one in the package's pyproject.toml,
+# released on its own schedule rather than with hluk's.
 name: Publish to PyPI
 
 on:
   workflow_dispatch:
     inputs:
+      package:
+        description: "The package to publish"
+        type: choice
+        options:
+          - smolagents-hyperlight
+          - mcp-server-hyperlight
+        default: smolagents-hyperlight
       dry_run:
         description: "Build and check without publishing"
         type: boolean
@@ -14,6 +22,14 @@ on:
 
 permissions:
   contents: read
+
+env:
+  PACKAGE: ${{ inputs.package }}
+  # The choice names the PyPI project, whose source is under integrations/
+  # by a shorter name
+  # A choice named here only: an unknown one names no directory, and the build
+  # fails rather than publish another package's
+  PACKAGE_DIR: integrations/${{ inputs.package == 'mcp-server-hyperlight' && 'mcp' || inputs.package == 'smolagents-hyperlight' && 'smolagents' || 'unknown' }}
 
 jobs:
   # Builds without the token: only the publish job below can mint one.
@@ -32,21 +48,21 @@ jobs:
       - name: Refuse to publish from another branch
         if: ${{ !inputs.dry_run && github.ref != 'refs/heads/main' }}
         run: |
-          echo "::error::smolagents-hyperlight is published from main only"
+          echo "::error::$PACKAGE is published from main only"
           exit 1
 
       # Only a warning: the upload skips the files PyPI has, so a run after
       # one that uploaded part of a version uploads the rest
       - name: Check version not already published
-        working-directory: integrations/smolagents
+        working-directory: ${{ env.PACKAGE_DIR }}
         run: |
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
-          if curl -sf "https://pypi.org/pypi/smolagents-hyperlight/$VERSION/json" > /dev/null; then
-            echo "::warning::smolagents-hyperlight $VERSION is already on PyPI"
+          if curl -sf "https://pypi.org/pypi/$PACKAGE/$VERSION/json" > /dev/null; then
+            echo "::warning::$PACKAGE $VERSION is already on PyPI"
           fi
 
       - name: Build
-        working-directory: integrations/smolagents
+        working-directory: ${{ env.PACKAGE_DIR }}
         run: |
           # Bumped by hand: Dependabot does not read workflow run lines
           python -m pip install build==1.6.1 twine==7.0.0
@@ -56,7 +72,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
-          path: integrations/smolagents/dist/
+          path: ${{ env.PACKAGE_DIR }}/dist/
           if-no-files-found: error
 
   publish:
@@ -67,7 +83,7 @@ jobs:
     # environment, so only this job can upload.
     environment:
       name: pypi
-      url: https://pypi.org/project/smolagents-hyperlight/
+      url: https://pypi.org/project/${{ inputs.package }}/
     permissions:
       id-token: write # PyPI trusted publishing (OIDC)
     steps:
