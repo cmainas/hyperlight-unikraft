@@ -18,8 +18,9 @@
 //! link-local one.
 //!
 //! [`AllowList`], [`BlockList`] and [`Filter`] additionally block loopback (127.0.0.0/8,
-//! ::1) because in the hostsock model a guest socket is a real host socket,
-//! and host-local services trust loopback without authentication.
+//! ::1), and the unspecified address (0.0.0.0, ::), which a connect sends
+//! to loopback, because in the hostsock model a guest socket is a real host
+//! socket, and host-local services trust loopback without authentication.
 //! [`NetworkPolicy::AllowAll`] permits loopback to support intra-guest server+client
 //! patterns (both endpoints are guest sockets on the host's loopback).
 //!
@@ -126,13 +127,13 @@ impl NetworkPolicy {
             // model a guest socket is a real host socket, so a guest
             // connecting to 127.0.0.1 reaches host-only services.
             NetworkPolicy::AllowList(al) => {
-                !ip.is_loopback()
+                !is_host_local(&ip)
                     && (al.is_allowed(&ip)
                         || (udp && addr.port() == 53 && al.resolvers.contains(&ip)))
             }
-            NetworkPolicy::BlockList(bl) => !ip.is_loopback() && !bl.blocks(&ip),
+            NetworkPolicy::BlockList(bl) => !is_host_local(&ip) && !bl.blocks(&ip),
             NetworkPolicy::Filter(f) => {
-                !ip.is_loopback() && f.allows(SocketAddr::new(ip, addr.port()), udp)
+                !is_host_local(&ip) && f.allows(SocketAddr::new(ip, addr.port()), udp)
             }
         }
     }
@@ -225,6 +226,13 @@ fn canonical(ip: IpAddr) -> IpAddr {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
         v4 => v4,
     }
+}
+
+/// Whether a connection to `ip` stays on the host: loopback, or the
+/// unspecified address (`0.0.0.0`, `::`), which a connect sends to
+/// loopback.
+fn is_host_local(ip: &IpAddr) -> bool {
+    ip.is_loopback() || ip.is_unspecified()
 }
 
 /// Whether `ip` is a cloud metadata address, refused under every policy:
@@ -1419,5 +1427,33 @@ mod tests {
             &dns_answer("example.com", "203.0.113.9".parse().unwrap()),
         );
         assert!(policy.allows(&"203.0.113.9:443".parse().unwrap(), false));
+    }
+
+    /// The unspecified address reaches the host's loopback when connected
+    /// to, so whatever refuses loopback refuses it too.
+    #[test]
+    fn the_unspecified_address_is_refused_with_loopback() {
+        struct All;
+        impl NetworkFilter for All {
+            fn allows_name(&self, _: &str) -> bool {
+                true
+            }
+            fn allows(&self, _: &Destination<'_>) -> bool {
+                true
+            }
+        }
+        let policies = [
+            NetworkPolicy::AllowList(AllowList::from_hosts(&["0.0.0.0", "::"]).unwrap()),
+            NetworkPolicy::BlockList(BlockList::from_hosts(&["1.2.3.4"]).unwrap()),
+            NetworkPolicy::Filter(Filter::new(All)),
+        ];
+        for policy in &policies {
+            for addr in ["0.0.0.0:443", "[::]:443", "[::ffff:0.0.0.0]:443"] {
+                assert!(
+                    !policy.allows(&addr.parse().unwrap(), false),
+                    "{policy:?} {addr}"
+                );
+            }
+        }
     }
 }

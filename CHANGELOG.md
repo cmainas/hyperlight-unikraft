@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A guest under a block list could reach the host's loopback services through the unspecified address: a connect to `0.0.0.0` or `::` goes to loopback on Linux, and only `127.0.0.0/8` and `::1` were refused. The lists and a filter refuse the unspecified address too.
 - No guest booted on Windows arm64 (#166): hyperlight-host puts WHP's emulated interrupt controller at guest physical addresses just below 4 GiB, and the initrd, mapped at `0xFEF0_0000`, ran into them past its first 17 MiB. The arm64 initrd is mapped at 4 GiB now; x86 keeps its address.
 - arm64 guests under nested Hyper-V (Windows arm64 runners) crashed at random, or read zeros where they had just written: the kernel mapped the pages it allocates at run time (heap, `mmap`, file pages) Non-shareable, which the CPU does not keep coherent across processors. They are Inner Shareable now, as the boot mappings were.
 - An `mmap()` hint inside the initrd was honoured, though the files extracted from it share its memory: the new mapping replaced their pages, and on x86 the kernel crashed writing it. The kernel reserves the initrd now, and the hint goes elsewhere; on arm64, whose initrd moved to 4 GiB, that is the first address HotSpot asks for.
