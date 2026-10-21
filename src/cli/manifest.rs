@@ -301,9 +301,9 @@ impl Manifest {
     pub fn mounts(&self) -> Result<Vec<Mount>, String> {
         Ok(parse_mounts(&self.run.mounts)?
             .into_iter()
-            .map(|m| Mount {
-                host_path: self.resolve(&m.host_path),
-                ..m
+            .map(|mut m| {
+                m.host_path = self.resolve(&m.host_path);
+                m
             })
             .collect())
     }

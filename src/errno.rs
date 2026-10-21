@@ -97,7 +97,6 @@ pub const ENOTRECOVERABLE: i32 = 131;
 pub const EPERM: i32 = 1;
 #[cfg(windows)]
 pub const EFAULT: i32 = 14;
-#[cfg(any(windows, target_vendor = "apple"))]
 pub const ENAMETOOLONG: i32 = 36;
 #[cfg(any(windows, target_vendor = "apple"))]
 pub const ELOOP: i32 = 40;
@@ -125,6 +124,10 @@ pub const EALREADY: i32 = 114;
 /// Linux errno for a host I/O error.
 pub fn from_io(e: &io::Error) -> i32 {
     if let Some(raw) = e.raw_os_error() {
+        // Not an error (0 would read as success), whatever made it.
+        if raw <= 0 {
+            return EIO;
+        }
         // A Linux host's errno *is* the guest ABI.
         #[cfg(target_os = "linux")]
         return raw;

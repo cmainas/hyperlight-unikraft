@@ -41,6 +41,7 @@ mod hostnet;
 pub mod net_policy;
 mod profile;
 
+pub use hostfs::{DirEntry, FileStat, FsBackend, S_IFDIR, S_IFMT, S_IFREG};
 pub use net_policy::{
     AllowList, BlockList, Destination, Filter, ListenPorts, NetworkFilter, NetworkPolicy,
     ResolveError,
@@ -818,15 +819,28 @@ pub fn configure_surrogates(max: usize) {
 
 // ── Mount ───────────────────────────────────────────────────────────────
 
-/// A host filesystem mount passed to the guest.
-#[derive(Debug, Clone)]
+/// A host filesystem mount passed to the guest: a host directory, or an
+/// embedder's [`FsBackend`].
+#[derive(Clone)]
 pub struct Mount {
     /// Guest-visible mount point (e.g. `/mnt/data`).
     pub guest_path: String,
-    /// Host directory to expose.
+    /// Host directory to expose; empty for a mount served by a backend.
     pub host_path: PathBuf,
     /// Mount read-only (`true` → `MNT_RDONLY`, writes return `EROFS`).
     pub readonly: bool,
+    backend: Option<Arc<dyn FsBackend>>,
+}
+
+impl std::fmt::Debug for Mount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mount")
+            .field("guest_path", &self.guest_path)
+            .field("host_path", &self.host_path)
+            .field("readonly", &self.readonly)
+            .field("backend", &self.backend.is_some())
+            .finish()
+    }
 }
 
 impl Mount {
@@ -839,6 +853,7 @@ impl Mount {
             guest_path: guest_path.into(),
             host_path: host_path.into(),
             readonly: false,
+            backend: None,
         }
     }
 
@@ -848,9 +863,38 @@ impl Mount {
     /// guest (target) second.
     pub fn ro(host_path: impl Into<PathBuf>, guest_path: impl Into<String>) -> Self {
         Self {
-            guest_path: guest_path.into(),
-            host_path: host_path.into(),
             readonly: true,
+            ..Self::rw(host_path, guest_path)
+        }
+    }
+
+    /// Create a mount whose file operations `backend` serves, instead of
+    /// a host directory: the embedder decides each one (see
+    /// [`FsBackend`]).  Read-only if `readonly`, and then the backend is
+    /// asked only to read.
+    ///
+    /// The mount has no host directory: its `host_path` is empty.
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use hyperlight_unikraft::{FsBackend, Mount, SandboxBuilder};
+    /// # fn quota_backend() -> Arc<dyn FsBackend> { unimplemented!() }
+    /// let mut sandbox = SandboxBuilder::from_initrd("rootfs/python.cpio")
+    ///     .mount(Mount::backend(quota_backend(), "/output", false))
+    ///     .boot()?;
+    /// sandbox.run("open('/output/result.txt', 'w').write('42')")?;
+    /// # Ok::<(), hyperlight_unikraft::Error>(())
+    /// ```
+    pub fn backend(
+        backend: Arc<dyn FsBackend>,
+        guest_path: impl Into<String>,
+        readonly: bool,
+    ) -> Self {
+        Self {
+            guest_path: guest_path.into(),
+            host_path: PathBuf::new(),
+            readonly,
+            backend: Some(backend),
         }
     }
 }

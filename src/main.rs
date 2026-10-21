@@ -345,10 +345,10 @@ fn parse_mount(m: &str) -> Option<Mount> {
         Some((g, "ro")) => (g, true),
         _ => (rest, false),
     };
-    Some(Mount {
-        host_path: PathBuf::from(host),
-        guest_path: guest.to_string(),
-        readonly,
+    Some(if readonly {
+        Mount::ro(host, guest)
+    } else {
+        Mount::rw(host, guest)
     })
 }
 

@@ -94,6 +94,35 @@ Two limits of the protocol as it stands.  A directory listing is one host call, 
 
 Passing `:ro` sets `MNT_RDONLY` on the VFS mount.  The kernel rejects writes at the VFS layer (returns `EROFS`) before they reach hostfs. The host side also enforces read-only as defense-in-depth.
 
+### Backends
+
+A mount need not be a host directory.  `Mount::backend(backend, guest_path, readonly)` serves it with the embedder's `FsBackend`, which is handed each of the operations above as a method call (`stat`, `read`, `write`, `create_dir`, `remove`, `truncate`, `list`, `rename`, and `symlink`, `hard_link` and `chmod`, which by default refuse links and ignore modes) and decides it: an embedder that accounts for every byte the guest writes, keeps files somewhere other than a directory, or refuses some names, does it there, while the guest's programs, C extensions and child processes included, use the files as on any mount.
+
+```rust
+use std::io;
+use hyperlight_unikraft::{DirEntry, FileStat, FsBackend};
+
+struct Quota { /* ... */ }
+
+impl FsBackend for Quota {
+    fn write(&self, path: &str, offset: Option<u64>, data: &[u8]) -> io::Result<()> {
+        // ...past the quota: the guest's write fails with EDQUOT.
+        Err(io::ErrorKind::QuotaExceeded.into())
+    }
+    // stat, read, create_dir, remove, truncate, list and rename too.
+}
+```
+
+Every argument is the guest's, and untrusted.  A guest program's paths come through the kernel's VFS, clean: relative to the mount, `/`-separated, the empty path its root, at most 1023 bytes.  But native code in the guest can make the host calls itself, with any string (absolute, `..`, empty components, tens of KiB), and a write's offset can be any `u64`, so confining paths to the backend's own files and bounding offsets is the backend's job.
+
+An error reaches the guest as the errno of its `io::ErrorKind` (`QuotaExceeded` is `EDQUOT`, `FileTooLarge` `EFBIG`, `PermissionDenied` `EACCES`), or as a raw OS error of the host's OS (one of 0 or less is `EIO`).  A panic in a backend method is caught and is `EIO` too.  The protocol is the one hostfs speaks to a directory, so its limits apply:
+
+- No handles: each read or write names its path and offset, at most 64 KiB at a time.
+- A directory is read by listing it once per entry and taking the next entry by its position, so `list` must return the same order while the directory is unchanged, and reading a large directory costs as many listings as it has entries.  A name that is empty, `.`, `..`, over 255 bytes, or has a `/` or NUL is left out.
+- `stat` gives the size, and the type and permission bits: a file or a directory (`FileStat::file`, `FileStat::dir`), the only nodes the kernel makes on a hostfs mount.  So there are no symbolic links on a backend mount for now, whatever `symlink` does.
+
+On a read-only mount the backend is asked only to read.  A backend runs while the guest is stopped in a host call, and the snapshot rules above hold for its mounts as for any.  A backend mount's `host_path` is empty.
+
 ### Snapshots
 
 Mounts belong to the run: give them to `hluk run` or `hluk snapshot run` (or to the `SandboxBuilder` that boots or restores), and save a snapshot without any.  On its `resume` entry the kernel fetches the host's mount list (with `GetResumeState`, which also brings the clock and resolver; `GetMounts` answers the same on its own), the same `vfs.fstab` entries a boot carries, and makes its mount table match: it mounts what the list adds, unmounts what the list lacks, and remounts an entry whose index or read-only flag changed.  Every hostfs node names its mount by index, so the host directory behind a guest path can differ between save and restore.
