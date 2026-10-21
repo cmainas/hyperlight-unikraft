@@ -474,6 +474,23 @@ jobs:
           python -m pip install ruff==0.17.1
           ruff check . && ruff format --check .
 
+      # The Desktop Extension as pypi-publish.yml packs it, validated here, where nothing is published
+      - name: Validate the Desktop Extension
+        if: matrix.package == 'mcp' && matrix.os == 'linux' && matrix.deps == 'newest'
+        working-directory: integrations/mcp
+        # Pinned, as ruff is
+        run: |
+          python pack_mcpb.py "$RUNNER_TEMP/hyperlight.mcpb"
+          # One command a line: bash -e stops at a failing one, but not at one inside an && list
+          mkdir "$RUNNER_TEMP/mcpb"
+          cd "$RUNNER_TEMP/mcpb"
+          unzip -q ../hyperlight.mcpb
+          # What the uv server type runs: its entry point, and the project that names the server to install
+          for file in icon.png src/server.py pyproject.toml; do
+            test -f "$file" || { echo "::error::The packed extension lacks $file"; exit 1; }
+          done
+          npx --yes @anthropic-ai/mcpb@2.1.2 validate manifest.json
+
       - name: Test
         working-directory: integrations/${{ matrix.package }}
         env:

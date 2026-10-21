@@ -1,0 +1,6 @@
+# The Desktop Extension's dependencies, which the client installs with uv: the server as published on PyPI
+[project]
+name = "mcp-server-hyperlight-mcpb"
+version = "0.1.1"
+requires-python = ">=3.10"
+dependencies = ["mcp-server-hyperlight==0.1.1"]

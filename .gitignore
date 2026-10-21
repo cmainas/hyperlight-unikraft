@@ -16,3 +16,5 @@ publish/
 /examples/wasmtime/calculator/target
 /examples/wasmtime/hello-p3/target
 /integrations/clickhouse/target
+# Desktop Extensions packed by integrations/mcp/pack_mcpb.py
+*.mcpb

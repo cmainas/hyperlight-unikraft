@@ -1,0 +1,3 @@
+# What testing the extension with `uv run --directory mcpb src/server.py` leaves
+.venv/
+uv.lock

@@ -1,0 +1,4 @@
+# What running the extension locally leaves: uv's venv and lock, and Python's caches
+.venv/
+uv.lock
+__pycache__/

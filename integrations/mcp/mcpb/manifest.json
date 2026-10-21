@@ -1,0 +1,82 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "mcp-server-hyperlight",
+  "display_name": "Hyperlight",
+  "version": "0.1.1",
+  "description": "Runs Python in a local, hardware-isolated micro-VM that keeps its state between calls.",
+  "long_description": "Runs Python in a Hyperlight micro-VM on your machine, through the `hluk` CLI, which must be installed first (https://github.com/hyperlight-dev/hyperlight-unikraft#install): on Linux, Windows, or macOS on Apple silicon, where the server is not tested yet. The guest has CPython 3.12 with numpy, pandas, scipy, scikit-learn, matplotlib, pillow and requests, none of your files and no network access, unless you list hosts it may connect to in the extension's settings. The first start pulls the guest image, which takes some seconds to a few minutes.",
+  "author": {
+    "name": "The Hyperlight Authors",
+    "url": "https://github.com/hyperlight-dev/hyperlight-unikraft"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hyperlight-dev/hyperlight-unikraft"
+  },
+  "homepage": "https://github.com/hyperlight-dev/hyperlight-unikraft/tree/main/integrations/mcp",
+  "documentation": "https://github.com/hyperlight-dev/hyperlight-unikraft/tree/main/integrations/mcp#readme",
+  "support": "https://github.com/hyperlight-dev/hyperlight-unikraft/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "src/server.py",
+        "--timeout=${user_config.timeout}",
+        "--net-allow=${user_config.allowed_hosts}"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "run_python",
+      "description": "Runs Python code; variables, imports and functions stay for the next call."
+    },
+    {
+      "name": "reset_sandbox",
+      "description": "Replaces the guest with a fresh one."
+    }
+  ],
+  "user_config": {
+    "timeout": {
+      "type": "number",
+      "title": "Time limit (seconds)",
+      "description": "Longest a call may run. A longer one is stopped, and the sandbox restarted without its variables.",
+      "default": 30,
+      "min": 1,
+      "max": 3600,
+      "required": false
+    },
+    "allowed_hosts": {
+      "type": "string",
+      "title": "Allowed hosts",
+      "description": "Hosts or IPs the sandbox may connect to, separated by commas, such as pypi.org, files.pythonhosted.org. Empty: no network.",
+      "default": "",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux",
+      "win32"
+    ],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  },
+  "keywords": [
+    "python",
+    "sandbox",
+    "micro-vm",
+    "code-execution",
+    "hyperlight"
+  ],
+  "license": "Apache-2.0"
+}
