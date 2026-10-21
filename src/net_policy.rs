@@ -836,7 +836,17 @@ fn dns_answer_ips(data: &[u8]) -> Option<(String, Vec<IpAddr>)> {
     Some((qname, ips))
 }
 
+/// Longest name, in its dotted text form, that DNS carries (RFC 1035's
+/// 255 octets on the wire).
+const MAX_NAME_LEN: usize = 253;
+
 /// Read a DNS name at `pos`, advancing pos past it.
+///
+/// Only a name a resolver could be asked about reads: at most
+/// [`MAX_NAME_LEN`] characters, in labels of printable ASCII with no dot of
+/// their own, so two names on the wire never read as the same text (the
+/// label `a.b` as the two labels `a` and `b`), and a forged message cannot
+/// make a long one out of a compression loop.
 fn dns_read_name(data: &[u8], pos: &mut usize) -> Option<String> {
     let mut name = String::new();
     let mut p = *pos;
@@ -868,14 +878,26 @@ fn dns_read_name(data: &[u8], pos: &mut usize) -> Option<String> {
             p = offset;
             continue;
         }
+        // 0x40 and 0x80: extended and reserved label types, not a length.
+        if len & 0xC0 != 0 {
+            return None;
+        }
         p += 1;
         if p + len > data.len() {
+            return None;
+        }
+        let label = &data[p..p + len];
+        if !label.iter().all(|b| b.is_ascii_graphic() && *b != b'.') {
             return None;
         }
         if !name.is_empty() {
             name.push('.');
         }
-        name.push_str(&String::from_utf8_lossy(&data[p..p + len]));
+        if name.len() + len > MAX_NAME_LEN {
+            return None;
+        }
+        // Printable ASCII, checked above.
+        name.extend(label.iter().map(|&b| char::from(b)));
         p += len;
     }
     if jumped {
@@ -1455,5 +1477,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A question whose name could not be asked of a resolver is refused:
+    /// a label with a dot in it, one with bytes that are not printable
+    /// ASCII, a name longer than DNS carries.
+    #[test]
+    fn names_no_resolver_could_be_asked_are_refused() {
+        let policy = NetworkPolicy::AllowList(AllowList::from_hosts(&["localhost"]).unwrap());
+        let raw = |labels: &[&[u8]]| {
+            let mut m = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+            for label in labels {
+                m.push(label.len() as u8);
+                m.extend_from_slice(label);
+            }
+            m.extend_from_slice(&[0, 0, 1, 0, 1]);
+            m
+        };
+        assert!(policy.allows_query(&raw(&[b"localhost"])));
+        // The one label "local.host" is not the name local.host.
+        assert!(dns_question_names(&raw(&[b"local.host"])).is_none());
+        assert!(dns_question_names(&raw(&[b"local\xffhost"])).is_none());
+        assert!(dns_question_names(&raw(&[b"local host"])).is_none());
+        let long = vec![b"a".repeat(63); 4];
+        let labels: Vec<&[u8]> = long.iter().map(Vec::as_slice).collect();
+        assert!(dns_question_names(&raw(&labels)).is_none());
+        let fits = [
+            b"a".repeat(63),
+            b"a".repeat(63),
+            b"a".repeat(63),
+            b"a".repeat(61),
+        ];
+        let labels: Vec<&[u8]> = fits.iter().map(Vec::as_slice).collect();
+        assert_eq!(
+            dns_question_names(&raw(&labels)).unwrap()[0].len(),
+            MAX_NAME_LEN
+        );
     }
 }
