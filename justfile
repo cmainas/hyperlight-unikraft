@@ -73,8 +73,15 @@ build *flags:
     set -euo pipefail
     if echo "{{flags}}" | grep -q -- '--debug'; then
         cargo build --manifest-path "{{root_dir}}/Cargo.toml"
+        profile=debug
     else
         cargo build --release --manifest-path "{{root_dir}}/Cargo.toml"
+        profile=release
+    fi
+    # Hypervisor.framework serves only a binary with its entitlement; the
+    # cargo runner signs what cargo runs, this the hluk the recipes run.
+    if [ "$(uname -s)" = Darwin ]; then
+        codesign -f -s - --entitlements "{{root_dir}}/dev/macos-entitlements.plist" "{{root_dir}}/target/$profile/hluk"
     fi
 
 [windows]
@@ -1079,7 +1086,9 @@ bench runtime *mode:
     }
 
     for script in "${workloads[@]}"; do
-        wname=$(basename "$script" | sed 's/\.\(py\|js\)$//')
+        # Not sed's \|, which macOS's sed lacks.
+        wname=$(basename "$script")
+        wname=${wname%.*}
         # The mount workload runs with a mount; the others as before.
         mount_args=()
         [ "$wname" = "mount" ] && mount_args=(--mount "$mount_dir:/mnt/bench")
@@ -1455,8 +1464,10 @@ conformance runtime *modules:
         test_modules=({{modules}})
     else
         echo "==> Discovering test modules..."
-        # One module per line to avoid output truncation
-        mapfile -t test_modules < <("$hluk" snapshot run "$snap_dir" --net --exec \
+        # One module per line to avoid output truncation; read in a loop,
+        # not by mapfile, which macOS's bash 3.2 lacks.
+        test_modules=()
+        while IFS= read -r mod; do test_modules+=("$mod"); done < <("$hluk" snapshot run "$snap_dir" --net --exec \
             "import os; d='/usr/local/lib/python3.12/test'; [print(f[:-3]) for f in sorted(os.listdir(d)) if f.startswith('test_') and f.endswith('.py')]" \
             2>/dev/null | grep "^test_" || true)
     fi
@@ -1466,33 +1477,46 @@ conformance runtime *modules:
         exit 1
     fi
 
-    # Build skip list from the known-failures manifest
-    declare -A SKIP=()
+    # The skip list from the known-failures manifest, one module per line
+    # (macOS's bash 3.2 has no associative arrays).
+    skip_list=
     if [ -f "$manifest" ]; then
-        while IFS= read -r mod; do
-            SKIP["$mod"]=1
-        done < <(grep -oP '^\s+"(test_[^"]+)"' "$manifest" | sed 's/.*"\(test_[^"]*\)".*/\1/')
+        skip_list=$(grep -E '^[[:space:]]+"test_[^"]+"' "$manifest" | sed 's/.*"\(test_[^"]*\)".*/\1/')
     fi
+    # And CONFORMANCE_SKIP's, space-separated: modules a host's network or
+    # setup fails, not the guest, which still run everywhere else.
+    for mod in ${CONFORMANCE_SKIP:-}; do skip_list=$(printf '%s\n%s' "$skip_list" "$mod"); done
+    skip_count=$(printf '%s' "$skip_list" | grep -c . || true)
+
+    # timeout(1), where there is one (not on macOS): SIGTERM after 60
+    # seconds, SIGKILL 5 later.
+    limited() {
+        if command -v timeout >/dev/null; then
+            timeout --kill-after=5 60 "$@"
+        else
+            perl -e '$p = fork // die; if (!$p) { exec @ARGV or die } $SIG{ALRM} = sub { kill "TERM", $p; sleep 5; kill "KILL", $p; exit 124 }; alarm 60; waitpid $p, 0; exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$@"
+        fi
+    }
 
     pass=0 fail=0 error=0 skip=0 crash=0 total=0
 
-    echo "==> Running ${#test_modules[@]} modules (${#SKIP[@]} in skip list)"
+    echo "==> Running ${#test_modules[@]} modules ($skip_count in skip list)"
     echo ""
 
     for mod in "${test_modules[@]}"; do
-        if [[ -n "${SKIP[$mod]+x}" ]]; then
+        if printf '%s\n' "$skip_list" | grep -qxF "$mod"; then
             echo "SKIP $mod"
             ((skip++)) || true
             ((total++)) || true
             continue
         fi
 
-        # Run this module in its own guest with a timeout.
-        # --kill-after=5 ensures a SIGKILL follows if the process
-        # ignores SIGTERM (some modules spin the hypervisor at 100% CPU).
+        # Run this module in its own guest with a timeout; the SIGKILL
+        # follows when the process ignores SIGTERM (some modules spin the
+        # hypervisor at 100% CPU).
         inline=$(printf "MODULE='%s'\n%s" "$mod" "$(cat '{{conformance_dir}}/{{runtime}}/run_tests.py')")
 
-        output=$(timeout --kill-after=5 60 "$hluk" snapshot run "$snap_dir" \
+        output=$(limited "$hluk" snapshot run "$snap_dir" \
             --net --exec "$inline" 2>/dev/null || echo "RESULT $mod status=CRASH tests=0 fail=0 error=0 skip=0 time=0")
 
         # Extract the RESULT line
@@ -1504,7 +1528,7 @@ conformance runtime *modules:
 
         echo "$result_line"
 
-        status=$(echo "$result_line" | grep -oP 'status=\K\w+')
+        status=$(echo "$result_line" | sed -n 's/.*status=\([A-Za-z]*\).*/\1/p')
         case "$status" in
             PASS)  ((pass++))  || true ;;
             FAIL)  ((fail++))  || true ;;
@@ -1567,6 +1591,7 @@ conformance runtime *modules:
     if (Test-Path $manifest) {
         foreach ($m in [regex]::Matches((Get-Content -Raw $manifest), '(?m)^\s+"(test_[^"]+)"')) { $skip[$m.Groups[1].Value] = $true }
     }
+    if ($env:CONFORMANCE_SKIP) { foreach ($mod in -split $env:CONFORMANCE_SKIP) { $skip[$mod] = $true } }
 
     $pass = 0; $fail = 0; $err = 0; $skipped = 0; $crash = 0; $total = 0
     Write-Output "==> Running $($testModules.Count) modules ($($skip.Count) in skip list)"

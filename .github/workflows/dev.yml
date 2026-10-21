@@ -101,6 +101,8 @@ jobs:
             runner: macos-latest
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
     env:
       HLUK_CHANNEL: ${{ needs.meta.outputs.channel }}
       HLUK_BUILD_VERSION: ${{ needs.meta.outputs.build }}

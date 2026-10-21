@@ -95,21 +95,31 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run publish-images.yml --ref "v${{ steps.version.outputs.version }}"
 
-  # Build the Windows binary on a Windows runner and attach it to the release
-  # created above. Separate job so each binary is built natively (no artifact
-  # hand-off needed — both upload straight to the release).
+  # Build the Windows binaries on Windows runners, one per architecture
+  # (each embeds its own kernel), and attach them to the release created
+  # above.  Separate jobs so each binary is built natively (no artifact
+  # hand-off needed — each uploads straight to the release).
   release-windows:
     needs: release-linux
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
+    strategy:
+      # One architecture's failure leaves the other's binary to upload.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: v${{ needs.release-linux.outputs.version }}
 
-      - name: Build hluk (Windows x86_64)
-        run: cargo build --release --locked
+      - name: Build hluk (Windows)
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package and upload binary
         shell: pwsh
@@ -117,8 +127,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $v = "${{ needs.release-linux.outputs.version }}"
-          Compress-Archive -Path target\release\hluk.exe -DestinationPath "hluk-v$v-x86_64-pc-windows-msvc.zip"
-          gh release upload "v$v" "hluk-v$v-x86_64-pc-windows-msvc.zip"
+          Compress-Archive -Path target\${{ matrix.target }}\release\hluk.exe -DestinationPath "hluk-v$v-${{ matrix.target }}.zip"
+          gh release upload "v$v" "hluk-v$v-${{ matrix.target }}.zip"
 
   # arm64 Linux, built natively on an arm64 runner (it embeds the arm64
   # kernel); static, like the x86_64 one.
