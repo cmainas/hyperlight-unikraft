@@ -1,0 +1,24 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.hyperlight-dev/mcp-server-hyperlight",
+  "title": "Hyperlight",
+  "description": "Runs Python in a local, hardware-isolated micro-VM that keeps its state between calls",
+  "repository": {
+    "url": "https://github.com/hyperlight-dev/hyperlight-unikraft",
+    "source": "github",
+    "subfolder": "integrations/mcp"
+  },
+  "websiteUrl": "https://github.com/hyperlight-dev/hyperlight-unikraft/tree/main/integrations/mcp",
+  "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mcp-server-hyperlight",
+      "version": "0.1.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

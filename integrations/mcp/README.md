@@ -1,5 +1,7 @@
 # mcp-server-hyperlight
 
+<!-- mcp-name: io.github.hyperlight-dev/mcp-server-hyperlight -->
+
 An [MCP](https://modelcontextprotocol.io) server that runs Python in a local Hyperlight micro-VM, for any MCP client: Claude Code, Claude Desktop, VS Code, Cursor and others.
 
 The server boots a Unikraft unikernel in its own hardware-isolated micro-VM (KVM or MSHV on Linux, WHP on Windows) through the `hluk` CLI. It needs no account, no daemon and no API key, and the code and its data stay on your machine. The guest has no network access unless you allow hosts with `--net-allow`, and none of your files unless you mount them.
