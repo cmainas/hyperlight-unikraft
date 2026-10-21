@@ -52,7 +52,10 @@ updates:
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: github-actions
-    directory: /
+    # / covers .github/workflows only: each composite action is listed too.
+    directories:
+      - /
+      - /.github/actions/*
     schedule:
       interval: monthly
     cooldown:
