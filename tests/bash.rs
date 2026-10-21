@@ -4,7 +4,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{hluk_with_stdin, require_rootfs, temp_dir};
+use common::{guest_log, hluk_with_stdin, require_rootfs, temp_dir};
 use hyperlight_unikraft::{Exec, SandboxBuilder};
 
 #[test]
@@ -207,8 +207,10 @@ fn bash_env_vars() {
 #[test]
 fn bash_pipes_and_substitutions() {
     let rootfs = require_rootfs("bash");
+    // Its kernel's messages are checked: at a level RUST_LOG cannot change.
     let mut sandbox = SandboxBuilder::from_initrd(rootfs)
         .scratch_mb(256)
+        .guest_log_level(tracing::level_filters::LevelFilter::ERROR)
         .boot()
         .unwrap();
     sandbox.run("echo hello | tr a-z A-Z").unwrap();
@@ -237,28 +239,61 @@ fn bash_pipes_and_substitutions() {
     assert_eq!(sandbox.drain_stderr(), "to-err\n");
     // A command that fails to execute: its vfork child exits without an
     // execve, and must not free the shell's stack on its way out.
-    sandbox.run("nope; sleep 0.1; echo after").unwrap();
-    // The kernel's messages about it are on stderr, without the NUL
-    // bytes they had.
+    let (run, log) = guest_log(|| sandbox.run("nope; sleep 0.1; echo after"));
+    run.unwrap();
+    // The shell says why on stderr.  The kernel's messages about it are
+    // in Hyperlight's guest log, with where they come from, not in the
+    // program's output.
     let stderr = sandbox.drain_stderr();
     assert!(
-        stderr.contains("Unable to load") && !stderr.contains('\0'),
+        stderr.contains("can't execute 'nope'") && !stderr.contains("ERR:"),
         "{stderr:?}"
+    );
+    assert!(
+        log.iter().any(|l| l.starts_with("[libposix_process] ")
+            && l.contains("/bin/nope: Unable to load (-2)")
+            && l.contains("(execve.c:")),
+        "{log:?}"
     );
     assert!(sandbox.drain_output().ends_with("after\n"));
     // Its kernel message outgrows the kernel's 191-byte line: with an
     // odd-length prefix the byte limit falls inside an 'é', and the cut
-    // must back off to a whole character, or the host aborts the call.
-    sandbox
-        .run("p=/xy; i=0; while [ $i -lt 100 ]; do p=${p}\u{e9}; i=$((i+1)); done; $p; echo after")
-        .unwrap();
-    // The cut message ends its line: the next kernel message starts one.
-    let stderr = sandbox.drain_stderr();
+    // must back off to a whole character (else its first byte would be
+    // sent as '?').
+    let (run, log) = guest_log(|| {
+        sandbox.run(
+            "p=/xy; i=0; while [ $i -lt 100 ]; do p=${p}\u{e9}; i=$((i+1)); done; $p; echo after",
+        )
+    });
+    run.unwrap();
     assert!(
-        stderr.contains("\u{e9}\n[") && stderr.ends_with('\n'),
-        "{stderr:?}"
+        log.iter()
+            .any(|l| l.contains("/xy\u{e9}\u{e9}") && l.contains("\u{e9} (") && !l.contains('?')),
+        "{log:?}"
     );
     assert!(sandbox.drain_output().ends_with("after\n"));
+    // Bytes that are not UTF-8 arrive as '?', not as a message the host
+    // refuses.
+    let (run, log) = guest_log(|| sandbox.run("p=$(printf '/x\\377y'); $p; echo after"));
+    run.unwrap();
+    assert!(log.iter().any(|l| l.contains("/x?y")), "{log:?}");
+    assert!(sandbox.drain_output().ends_with("after\n"));
+}
+
+/// The guest log level is the host's to choose: off, the kernel sends
+/// none of its messages.
+#[test]
+fn bash_guest_log_level_off_sends_nothing() {
+    let rootfs = require_rootfs("bash");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .guest_log_level(tracing::level_filters::LevelFilter::OFF)
+        .boot()
+        .unwrap();
+    let (run, log) = guest_log(|| sandbox.run("nope; echo after"));
+    run.unwrap();
+    assert_eq!(log, Vec::<String>::new());
+    assert!(!sandbox.drain_stderr().contains("ERR:"));
 }
 
 /// `exit` ends the shell, which is the runtime: the call ends with that

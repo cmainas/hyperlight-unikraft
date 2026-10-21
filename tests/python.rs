@@ -296,7 +296,7 @@ fn python_stdin_is_bytes() {
     data.extend("é".repeat(5000).as_bytes());
     data.extend([0xff, 0x00, 0xc3]);
     let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
-    // The console echoes what it reads, so the line may start with that.
+    // Piped in, it is not echoed; the line may still carry a prompt.
     let output = hluk_with_stdin(&rootfs, &script, &data);
     let want = format!("stdin {hex}");
     assert!(
@@ -328,6 +328,11 @@ fn python_stdin_piped() {
     assert!(
         output.contains("stdin-done"),
         "expected stdin-done marker, got: {output:?}"
+    );
+    // Not echoed back, as a terminal would: a pipe fed it
+    assert!(
+        !output.lines().any(|l| l.trim_end() == "hello from host"),
+        "the piped input was echoed: {output:?}"
     );
 }
 
@@ -1095,6 +1100,7 @@ fn python_stderr_apart_from_stdout() {
     let rootfs = require_rootfs("python");
     let mut sandbox = SandboxBuilder::from_initrd(rootfs)
         .scratch_mb(256)
+        .console_terminal(true)
         .boot()
         .unwrap();
     sandbox
@@ -1113,13 +1119,19 @@ fn python_stderr_apart_from_stdout() {
         .unwrap();
     assert_eq!(sandbox.drain_stderr(), "\u{20ac}".repeat(3000));
 
-    // fd 2 is a file of its own, still a terminal; /dev/stdout keeps
-    // newlines as written too.
+    // fd 2 is a file of its own, a terminal where this process's stderr
+    // is one; /dev/stdout keeps newlines as written too.
     sandbox.drain_output();
     sandbox
         .run("import os\nprint(os.fstat(1).st_ino != os.fstat(2).st_ino, os.isatty(2))\nf = open('/dev/stdout', 'w')\nf.write('a\\nb\\n')\nf.close()")
         .unwrap();
-    assert_eq!(sandbox.drain_output(), "True True\na\nb\n");
+    use std::io::IsTerminal;
+    let terminal = if std::io::stderr().is_terminal() {
+        "True"
+    } else {
+        "False"
+    };
+    assert_eq!(sandbox.drain_output(), format!("True {terminal}\na\nb\n"));
 }
 
 /// A host without `HostWriteErr` gets standard error through `HostWrite`,
@@ -1558,4 +1570,180 @@ fn python_pythonpath_keeps_empty_entries_and_the_standard_order() {
             && output.contains(&format!("end {start}")),
         "expected {start} back after {site} was moved, got: {output:?}",
     );
+}
+
+/// A mounted file's mode and times are the host's, and chmod and utime
+/// change them there: the mode used to be 755 for every file, the times
+/// the epoch and utime did nothing.
+#[test]
+fn python_mount_modes_and_times() {
+    let rootfs = require_rootfs("python");
+    let mount_dir = temp_dir("fs-modes-times");
+    let file = mount_dir.path().join("f.txt");
+    std::fs::write(&file, "x").unwrap();
+    let mtime = std::time::UNIX_EPOCH + std::time::Duration::new(1_500_000_000, 250_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    }
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .mounts(vec![Mount::rw(mount_dir.path(), "/mnt/host")])
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            "import os\n\
+             st = os.stat('/mnt/host/f.txt')\n\
+             print('mode', oct(st.st_mode & 0o777), 'mtime', st.st_mtime_ns)\n\
+             os.chmod('/mnt/host/f.txt', 0o4755)\n\
+             print('set', oct(os.stat('/mnt/host/f.txt').st_mode & 0o7777))\n\
+             os.chmod('/mnt/host/f.txt', 0o600)\n\
+             os.utime('/mnt/host/f.txt', ns=(1_000_000_000_000_000_000, 1_600_000_000_500_000_000))\n\
+             try:\n\
+             \x20   os.utime('/mnt/host/f.txt', (-1, -1))\n\
+             except OSError as e:\n\
+             \x20   print('before 1970', e.errno)\n\
+             print('changed')",
+        )
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(output.contains("mtime 1500000000250000000"), "{output}");
+    // EINVAL, and the host still serving: the crates that set times panic
+    // on one before the epoch
+    assert!(output.contains("before 1970 22"), "{output}");
+    assert!(output.contains("changed"), "{output}");
+    let meta = std::fs::metadata(&file).unwrap();
+    assert_eq!(
+        meta.modified().unwrap(),
+        std::time::UNIX_EPOCH + std::time::Duration::new(1_600_000_000, 500_000_000)
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert!(output.contains("mode 0o640"), "{output}");
+        // The host file never takes set-user-ID from the guest
+        assert!(output.contains("set 0o755"), "{output}");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+}
+
+/// mkdir and rmdir take a directory with trailing slashes, as busybox's
+/// `mkdir -p` passes it, on the host's directories and the guest's own;
+/// the working directory at a mount's root has no trailing slash.
+#[test]
+fn python_trailing_slashes() {
+    let rootfs = require_rootfs("python");
+    let mount_dir = temp_dir("fs-trailing-slash");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .mounts(vec![Mount::rw(mount_dir.path(), "/mnt/host")])
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            "import os\n\
+             for top in ('/mnt/host', '/tmp'):\n\
+             \x20   os.mkdir(top + '/a/')\n\
+             \x20   os.mkdir(top + '/a/b//')\n\
+             \x20   print(top, sorted(os.listdir(top + '/a')))\n\
+             \x20   os.rmdir(top + '/a/b/')\n\
+             \x20   os.rmdir(top + '/a/')\n\
+             os.chdir('/mnt/host')\n\
+             print('cwd', repr(os.getcwd()))",
+        )
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(output.contains("/mnt/host ['b']"), "{output}");
+    assert!(output.contains("/tmp ['b']"), "{output}");
+    assert!(output.contains("cwd '/mnt/host'"), "{output}");
+    assert_eq!(std::fs::read_dir(mount_dir.path()).unwrap().count(), 0);
+}
+
+/// A guest whose output is captured, not printed to a terminal, has no
+/// terminal for its console: programs must not color it or prompt.
+#[test]
+fn python_captured_console_is_not_a_terminal() {
+    let rootfs = require_rootfs("python");
+    // Allowed a terminal, but with nothing echoed there is none to see
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .echo_output(false)
+        .console_terminal(true)
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            "import sys, termios\n\
+             print([s.isatty() for s in (sys.stdin, sys.stdout, sys.stderr)])\n\
+             try:\n\
+             \x20   termios.tcgetattr(1)\n\
+             except termios.error as e:\n\
+             \x20   print('tcgetattr', e.args[0])",
+        )
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(output.contains("[False, False, False]"), "{output}");
+    // ENOTTY
+    assert!(output.contains("tcgetattr 25"), "{output}");
+}
+
+/// A script past what a host call carries runs; one past what a guest
+/// function call carries is refused before it is sent, and the guest
+/// serves on.
+#[test]
+fn python_large_script() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .echo_output(false)
+        .boot()
+        .unwrap();
+    let padding = format!("# {}\n", "x".repeat(97)).repeat(5_000);
+    sandbox.run(format!("{padding}print('large ok')")).unwrap();
+    assert!(sandbox.drain_output().contains("large ok"));
+    let too_large = "#".repeat(hyperlight_unikraft::CALL_PAYLOAD_MAX + 1);
+    assert!(matches!(
+        sandbox.run(too_large),
+        Err(Error::CallTooLarge { bytes }) if bytes == hyperlight_unikraft::CALL_PAYLOAD_MAX + 1
+    ));
+    sandbox.run("print('still serving')").unwrap();
+    assert!(sandbox.drain_output().contains("still serving"));
+}
+
+/// What a failed program says is its own: no kernel messages for an exec
+/// that failed as a PATH search does, no driver message after a call that
+/// exited with a status.
+#[test]
+fn python_failures_print_only_their_own_words() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .echo_output(false)
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            "import subprocess\n\
+             try:\n\
+             \x20   subprocess.run(['/nonexistent'])\n\
+             except FileNotFoundError:\n\
+             \x20   print('not found')",
+        )
+        .unwrap();
+    // Standard error first: draining the output clears it too
+    assert_eq!(sandbox.drain_stderr(), "");
+    assert!(sandbox.drain_output().contains("not found"));
+    assert!(matches!(
+        sandbox.run("import sys; sys.exit(3)"),
+        Err(Error::CallFailed { status: 3 })
+    ));
+    assert_eq!(sandbox.drain_stderr(), "");
 }
