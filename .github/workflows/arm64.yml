@@ -461,7 +461,8 @@ jobs:
       matrix.pool, matrix.runtime, github.run_id, github.run_attempt)) || matrix.runner }}
     permissions:
       contents: write   # push to gh-pages
-    timeout-minutes: ${{ github.event_name == 'schedule' && 240 || 60 }}
+    # 25 of them for the gate's second measurement (benchmarks/gate.sh).
+    timeout-minutes: ${{ github.event_name == 'schedule' && 265 || 85 }}
     strategy:
       fail-fast: false
       matrix:
@@ -494,26 +495,16 @@ jobs:
         shell: bash
         run: just bench ${{ matrix.runtime }}
 
-      # ci.yml's check, in Python: the Windows arm64 runners have no jq.
+      # The gate: benchmarks/gate.sh, which measures a timing over its
+      # ceiling again before it fails on it. A hang in that second run times
+      # out this step rather than the job, so Store still charts the first.
       - name: Check ceilings
         shell: bash
+        timeout-minutes: 25
         env:
           RUNTIME: ${{ matrix.runtime }}
           HOST: ${{ matrix.os }}-arm64
-        run: |
-          python - <<'EOF'
-          import json, os, sys
-          limits = json.load(open("benchmarks/limits.json"))
-          ceilings = limits.get(os.environ["RUNTIME"], {}).get(os.environ["HOST"], {})
-          over = [f"{r['name']}: {r['value']} {r['unit']} is over the ceiling of {ceilings[r['name']]} {r['unit']}"
-                  for r in json.load(open("bench-results.json"))
-                  if r["name"] in ceilings and r["value"] > ceilings[r["name"]]]
-          for line in over:
-              print("::error::" + line)
-          if over:
-              sys.exit(f"{len(over)} ceiling(s) exceeded")
-          print(f"all {len(ceilings)} ceilings met")
-          EOF
+        run: bash benchmarks/gate.sh "$RUNTIME" "$HOST"
 
       # Without the Macs' system credential helper, osxkeychain, which hangs
       # this action's fetch of gh-pages (a token in the URL) until the job

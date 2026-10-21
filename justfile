@@ -1041,7 +1041,8 @@ bench runtime *mode:
             --output "$snap_dir"
     fi
 
-    samples=20
+    # BENCH_SAMPLES: fewer for benchmarks/gate.sh's second measurement.
+    samples=${BENCH_SAMPLES:-20}
     parallel_vms=4
     parallel_iters=10
     modes="{{mode}}"
@@ -1049,10 +1050,13 @@ bench runtime *mode:
         modes="cold cold-snap warm-restore warm-stateful parallel"
     fi
 
-    # Collect all workload scripts
+    # Collect all workload scripts, or those BENCH_WORKLOADS names (space-
+    # separated): benchmarks/gate.sh measures a breach again alone.
     workloads=()
     for f in "$bench_dir"/*.py "$bench_dir"/*.js; do
-        [ -f "$f" ] && workloads+=("$f")
+        [ -f "$f" ] || continue
+        n=${f##*/}
+        case " ${BENCH_WORKLOADS:-${n%.*}} " in *" ${n%.*} "*) workloads+=("$f") ;; esac
     done
     if [ ${#workloads[@]} -eq 0 ]; then
         echo "error: no benchmark scripts in $bench_dir" >&2
@@ -1139,7 +1143,8 @@ bench runtime *mode:
     done
 
     # ── Compact summary table ──────────────────────────────────
-    jsonfile="{{root_dir}}/bench-results.json"
+    # BENCH_RESULTS: elsewhere for benchmarks/gate.sh's second measurement.
+    jsonfile="${BENCH_RESULTS:-{{root_dir}}/bench-results.json}"
     echo ""
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
@@ -1253,13 +1258,16 @@ bench runtime *mode:
         if ($LASTEXITCODE -ne 0) { Write-Error "snapshot save failed" }
     }
 
-    $samples = 20
+    # BENCH_SAMPLES: fewer for benchmarks/gate.sh's second measurement.
+    $samples = if ($env:BENCH_SAMPLES) { [int]$env:BENCH_SAMPLES } else { 20 }
     $parallelVms = 4
     $parallelIters = 10
     $modes = "{{mode}}".Trim()
     if (-not $modes) { $modes = "cold cold-snap warm-restore warm-stateful parallel" }
 
     $workloads = @(Get-ChildItem $benchDir -File | Where-Object { $_.Extension -in '.py', '.js' } | Sort-Object Name)
+    # Or those BENCH_WORKLOADS names (space-separated): benchmarks/gate.sh measures a breach again alone.
+    if ($env:BENCH_WORKLOADS) { $workloads = @($workloads | Where-Object { $_.BaseName -cin (-split $env:BENCH_WORKLOADS) }) }
     if ($workloads.Count -eq 0) { Write-Error "no benchmark scripts in $benchDir" }
 
     # The host directory behind the mount workload's --mount.
@@ -1323,7 +1331,8 @@ bench runtime *mode:
         }
     }
 
-    $jsonFile = "{{root_dir}}/bench-results.json"
+    # BENCH_RESULTS: elsewhere for benchmarks/gate.sh's second measurement.
+    $jsonFile = if ($env:BENCH_RESULTS) { $env:BENCH_RESULTS } else { "{{root_dir}}/bench-results.json" }
     Write-Output ""
     Write-Output ""
     Write-Output "╔══════════════════════════════════════════════════════════════╗"
