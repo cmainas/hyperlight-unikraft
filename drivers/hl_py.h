@@ -138,6 +138,49 @@ out:
 	Py_XDECREF(os);
 }
 
+/*
+ * Flush Python's standard streams, then the C streams under them: what
+ * a call wrote without a newline, or through sys.stdout.buffer, waits in
+ * Python's buffers otherwise, and the host never hears it.  The
+ * originals too (sys.__stdout__, sys.__stderr__), whatever replaced
+ * them.  A stream that cannot flush (closed, or one without a flush) has
+ * nothing to give, so its error is dropped; an exception the caller has
+ * yet to print is kept.
+ */
+static void hl_py_flush_streams(void)
+{
+	static const char *const names[] = { "stdout", "stderr",
+					     "__stdout__", "__stderr__" };
+	/* Owned: a stream's flush can rebind the others and free one, and a
+	 * new stream at its address must not pass for it. */
+	PyObject *flushed[sizeof(names) / sizeof(names[0])];
+	PyObject *exc = PyErr_GetRaisedException();
+	size_t n = 0;
+
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		PyObject *stream = PySys_GetObject(names[i]);	/* borrowed */
+		PyObject *res;
+		size_t j;
+
+		if (!stream || stream == Py_None)
+			continue;
+		for (j = 0; j < n && flushed[j] != stream; j++)
+			;
+		if (j < n)
+			continue;
+		flushed[n++] = Py_NewRef(stream);
+		res = PyObject_CallMethod(stream, "flush", NULL);
+		if (!res)
+			PyErr_Clear();
+		Py_XDECREF(res);
+	}
+	while (n)
+		Py_DECREF(flushed[--n]);
+	PyErr_SetRaisedException(exc);
+	fflush(stdout);
+	fflush(stderr);
+}
+
 /* ── Dispatch callback ─────────────────────────────────────────── */
 
 /*
@@ -206,6 +249,8 @@ static int hl_py_exec(const char *src)
 		Py_DECREF(res);
 		return 0;
 	}
+	/* What the code wrote comes before the traceback or exit message. */
+	hl_py_flush_streams();
 	if (PyErr_ExceptionMatches(PyExc_SystemExit))
 		return hl_py_exit_status();
 	/* As `python script.py` exits on an uncaught exception: 1. */
@@ -461,7 +506,11 @@ static int hl_py_call(const char *name, size_t name_len, const char *input,
 		res = PyObject_CallFunctionObjArgs(g_hl_py_call_fn, n, in, NULL);
 	Py_XDECREF(n);
 	Py_XDECREF(in);
+	/* On a failure, what the function wrote comes before the report:
+	 * a traceback, an exit message, a result that does not fit.  A call
+	 * that went well is flushed once, by hl_py_dispatch. */
 	if (!res) {
+		hl_py_flush_streams();
 		if (PyErr_ExceptionMatches(PyExc_SystemExit))
 			return hl_py_exit_status();
 		PyErr_Print();
@@ -472,9 +521,11 @@ static int hl_py_call(const char *name, size_t name_len, const char *input,
 		const char *text = PyUnicode_AsUTF8AndSize(res, &len);
 
 		if (!text) {
+			hl_py_flush_streams();
 			PyErr_Print();
 			status = 1;
 		} else if (hl_set_result(text, (size_t)len) < 0) {
+			hl_py_flush_streams();
 			fprintf(stderr, "hl_py: %.*s's result does not fit a call\n",
 				(int)name_len, name);
 			status = 1;
@@ -504,14 +555,10 @@ static int hl_py_run(const uint8_t *fc, size_t fc_len)
 	if (fc_name_is(fc, fc_len, "Call")) {
 		size_t in_len;
 		const char *in = fc_arg_string(fc, fc_len, 1, &in_len);
-		int rc;
 
 		if (!code_len || !in)
 			return -1;
-		rc = hl_py_call(code, code_len, in, in_len);
-		fflush(stdout);
-		fflush(stderr);
-		return rc;
+		return hl_py_call(code, code_len, in, in_len);
 	}
 
 	/* Guest command ("GuestExec" — --guest-exec / autonomous): run the named
@@ -564,9 +611,6 @@ static int hl_py_run(const uint8_t *fc, size_t fc_len)
 	if (buf != stack_buf)
 		free(buf);
 
-	fflush(stdout);
-	fflush(stderr);
-
 	return rc;
 }
 
@@ -588,6 +632,8 @@ static int hl_py_dispatch(const uint8_t *fc, size_t fc_len)
 	PyEval_RestoreThread(g_hl_py_tstate);
 	g_hl_py_serving = PyThread_get_thread_ident();
 	rc = hl_py_run(fc, fc_len);
+	/* Whichever way the call ended, what it wrote goes out with it. */
+	hl_py_flush_streams();
 	g_hl_py_serving = 0;
 	g_hl_py_tstate = PyEval_SaveThread();
 	return rc;
@@ -608,6 +654,9 @@ static inline __attribute__((noreturn)) void hl_py_serve(void)
 	 * for the host's, whatever it sends before the first call. */
 	hl_py_env_refresh();
 	hl_driver_serve_calls();
+	/* Nothing boot left buffered waits in a warm snapshot for the first
+	 * call to release. */
+	hl_py_flush_streams();
 	g_hl_py_tstate = PyEval_SaveThread();
 	hl_driver_run(hl_py_dispatch);
 }

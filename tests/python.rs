@@ -1107,6 +1107,74 @@ fn python_stderr_reaches_a_host_without_host_write_err() {
     );
 }
 
+/// What a call leaves in Python's buffers reaches the host when the call
+/// ends: output with no newline, bytes through `sys.stdout.buffer`, the
+/// original `sys.__stdout__` once `sys.stdout` is replaced, and what was
+/// written before an exception (ahead of its traceback) or a
+/// `SystemExit`, for code, a guest file and a guest function call alike.
+#[test]
+fn python_unflushed_output_reaches_the_host() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox.run("print('a', end='')").unwrap();
+    assert_eq!(sandbox.drain_output(), "a");
+    sandbox
+        .run("import sys\nsys.stdout.buffer.write(b'bytes')")
+        .unwrap();
+    assert_eq!(sandbox.drain_output(), "bytes");
+    sandbox
+        .run("import io, sys\nsys.__stdout__.write('original')\nsys.stdout = io.StringIO()")
+        .unwrap();
+    assert_eq!(sandbox.drain_output(), "original");
+    sandbox
+        .run("import sys\nsys.stdout = sys.__stdout__")
+        .unwrap();
+
+    assert!(
+        sandbox
+            .run("import sys\nsys.stdout.write('before')\n1 / 0")
+            .is_err()
+    );
+    let output = sandbox.drain_output();
+    assert!(output.starts_with("beforeTraceback"), "{output:?}");
+    assert!(
+        sandbox
+            .run("import sys\nsys.stdout.write('out')\nsys.stderr.write('e')\nsys.exit(3)")
+            .is_err()
+    );
+    let stderr = sandbox.drain_stderr();
+    assert!(stderr.starts_with('e'), "{stderr:?}");
+    let output = sandbox.drain_output();
+    assert!(output.starts_with("out"), "{output:?}");
+
+    sandbox
+        .run("open('/tmp/unflushed.py', 'w').write(\"print('guest file', end='')\")")
+        .unwrap();
+    sandbox.drain_output();
+    sandbox
+        .run(Exec::Guest("/tmp/unflushed.py".into()))
+        .unwrap();
+    assert_eq!(sandbox.drain_output(), "guest file");
+
+    sandbox
+        .run("def quiet():\n    print('q', end='')\n")
+        .unwrap();
+    sandbox.drain_output();
+    assert_eq!(sandbox.call("quiet", "").unwrap(), "");
+    assert_eq!(sandbox.drain_output(), "q");
+
+    sandbox
+        .run("def fails():\n    print('x', end='')\n    1 / 0\n")
+        .unwrap();
+    sandbox.drain_output();
+    assert!(sandbox.call("fails", "").is_err());
+    let output = sandbox.drain_output();
+    assert!(output.starts_with("xTraceback"), "{output:?}");
+}
+
 /// The issue's program: 4 MiB written 1 KiB at a time keeps the first
 /// 64 KiB on the host and counts the rest, however the guest writes it,
 /// reopening `/dev/stdout` included.  The next call starts a new budget.

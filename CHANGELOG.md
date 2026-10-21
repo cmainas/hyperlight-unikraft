@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `mcp-server-hyperlight` (`integrations/mcp/`): an [MCP](https://modelcontextprotocol.io) server, on stdio, whose `run_python` tool runs Python in a micro-VM that keeps its variables between calls, and whose `reset_sandbox` tool replaces it with a fresh one from the warm snapshot. It runs its guest through `smolagents-hyperlight`'s executor, so the two share the guest protocol and its bounds; the guest starts as the client starts the server, and has no network unless hosts are allowed (`--net-allow`). Published to PyPI on its own version, by `pypi-publish.yml`, which now takes the package to publish. CI tests it beside the smolagents executor, in micro-VMs on Linux and Windows: on the oldest Python with mcp, smolagents-hyperlight and smolagents at the floors it allows, from PyPI, and on the newest with the commit's smolagents-hyperlight.
 - CI builds, lints and unit-tests on Windows arm64 (hosted `windows-11-arm`), so the aarch64-pc-windows-msvc code paths (WHP on arm64) compile and pass clippy on every PR.
 
+### Fixed
+
+- Python output a call left in `sys.stdout` or `sys.stderr` (or the original `sys.__stdout__` and `sys.__stderr__`) reaches the host when the call ends: text with no newline (`print(x, end='')`, `json.dump(obj, sys.stdout)`), bytes written through `sys.stdout.buffer`, and what was written before an exception, now ahead of its traceback, or a `SystemExit`. The driver flushed only the C streams under them, so this arrived with a later call's output, or never if the sandbox ended or was restored first, for runs and guest function calls alike, in the python, python-shell and agent images; output left buffered at boot no longer waits in the warm snapshot for the first call.
+
 ## [v0.18.0]
 
 ### Added
