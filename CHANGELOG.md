@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `os.chmod` (and every `chmod`) on a mount failed with `EIO`: the host took the mode as unsigned and the kernel sends it signed, so the host call was refused before it ran. It now reaches the host file, permission bits only: a guest cannot set setuid, setgid or sticky.
 - DNS messages are read only as far as a resolver could be asked: a name longer than 253 characters, a label with a dot or a byte that is not printable ASCII, or an extended label type makes the message no well-formed query (refused) or answer (ignored). The label `a.b` read as the two labels `a` and `b`, and a forged answer could spell out a name kilobytes long through a compression loop.
 - A `sendto` on a connected TCP socket was judged by the address it named, though the data goes to the socket's peer: a guest connected to a resolver on port 53 could send anything there by naming an address the policy allows, past the check of its DNS questions. A `sendto` on a stream socket is a `send` to its peer now, checked as one.
 - A guest under a block list could reach the host's loopback services through the unspecified address: a connect to `0.0.0.0` or `::` goes to loopback on Linux, and only `127.0.0.0/8` and `::1` were refused. The lists and a filter refuse the unspecified address too.

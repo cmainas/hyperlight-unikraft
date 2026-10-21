@@ -395,6 +395,40 @@ fn python_stdin_empty_piped() {
     );
 }
 
+/// `os.chmod` on a mount reaches the host file, its permission bits only.
+#[cfg(unix)]
+#[test]
+fn python_chmod_reaches_the_host() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rootfs = require_rootfs("python");
+    let mount_dir = temp_dir("fs-chmod");
+    std::fs::write(mount_dir.path().join("f"), "f").unwrap();
+    std::fs::write(mount_dir.path().join("g"), "g").unwrap();
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .mounts(vec![Mount::rw(mount_dir.path(), "/mnt/host")])
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            "import os\nos.chmod('/mnt/host/f', 0o600)\nos.chmod('/mnt/host/g', 0o6755)\nprint('changed')",
+        )
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(output.contains("changed"), "got: {output:?}");
+    let mode = |name: &str| {
+        std::fs::metadata(mount_dir.path().join(name))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    assert_eq!(mode("f"), 0o600);
+    // Setuid and setgid are not the guest's to give.
+    assert_eq!(mode("g"), 0o755);
+}
+
 /// A path that is not UTF-8 fails the syscall, not the guest function
 /// call: the host cannot take it as a string, and the kernel refuses it
 /// before sending (it used to fail the whole call).

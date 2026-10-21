@@ -484,8 +484,13 @@ pub(crate) fn register(
         let prof = profile.clone();
         target.register_host_function(
             "fs_chmod",
-            move |mount_idx: i32, path: String, mode: u32| -> hyperlight_host::Result<i32> {
+            move |mount_idx: i32, path: String, mode: i32| -> hyperlight_host::Result<i32> {
                 let _profile = prof.host("fs_chmod");
+                // The kernel sends the mode as a C int; taking it as u32
+                // failed every call on the parameter type.  Only the
+                // permission bits: setuid, setgid and sticky would let a
+                // guest plant a setuid program on the host.
+                let mode = mode as u32 & 0o777;
                 let Some(d) = dirs.get(mount_idx as usize) else {
                     return Ok(-errno::EINVAL);
                 };
