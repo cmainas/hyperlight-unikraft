@@ -322,7 +322,10 @@ static inline __attribute__((noreturn)) void hl_driver_run(hl_dispatch_fn_t cb)
 			status = -1;
 		}
 
-		if (status != 0 && ran) {
+		/* A positive status is the workload's own exit status, which
+		 * it has explained if it meant to; only the driver's failure
+		 * to run the call is the driver's to report. */
+		if (status < 0 && ran) {
 			fprintf(stderr, "hl_driver: dispatch callback failed\n");
 			fflush(stderr);
 		}

@@ -69,6 +69,14 @@ static int exec_dispatch(const uint8_t *fc, size_t fc_len)
 	if (!argv[0])
 		return 0;
 	if (access(argv[0], X_OK) != 0) {
+		/* There, but not to be run (no execute bit): a failure, as a
+		 * shell's 126; only a missing file is nothing to run. */
+		if (errno != ENOENT && errno != ENOTDIR) {
+			fprintf(stderr, "hl: cannot execute %s: %s\n", argv[0],
+				strerror(errno));
+			fflush(stderr);
+			return 126;
+		}
 		fprintf(stderr, "hl: no executable %s in rootfs; nothing to run\n",
 			argv[0]);
 		fflush(stderr);
@@ -89,6 +97,13 @@ static int exec_dispatch(const uint8_t *fc, size_t fc_len)
 	/* The child needs only the write end, whose close is the EOF. */
 	fcntl(fds[0], F_SETFD, FD_CLOEXEC);
 
+	/* Why the program could not start: the vfork child shares this
+	 * memory, so it leaves its errno here for the parent to report, as a
+	 * shell does; the kernel says nothing of an execve that fails as a
+	 * PATH search expects. */
+	static volatile int exec_errno;
+
+	exec_errno = 0;
 	pid_t pid = vfork();
 	if (pid < 0) {
 		close(fds[0]);
@@ -101,6 +116,7 @@ static int exec_dispatch(const uint8_t *fc, size_t fc_len)
 		/* Child — only exec or _exit allowed after vfork.  It inherits
 		 * the pipe's write end, whose close at exit is the EOF. */
 		execv(argv[0], argv);
+		exec_errno = errno;
 		_exit(127);
 	}
 
@@ -116,7 +132,17 @@ static int exec_dispatch(const uint8_t *fc, size_t fc_len)
 	/* The EOF says the program is gone, not how it went: its exit status
 	 * is the call's, so a non-zero exit or a signal (an abort, a
 	 * std::terminate) fails the call as it would fail a shell. */
-	return hl_wait_status(pid);
+	int status = hl_wait_status(pid);
+
+	if (exec_errno) {
+		fprintf(stderr, "hl: cannot execute %s: %s\n", argv[0],
+			strerror(exec_errno));
+		fflush(stderr);
+		/* As a shell: 127 for no such file, 126 for one that is no
+		 * program it can run. */
+		return exec_errno == ENOENT ? 127 : 126;
+	}
+	return status;
 }
 
 /* ── Entry point ───────────────────────────────────────────────── */

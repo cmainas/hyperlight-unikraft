@@ -310,7 +310,8 @@ impl Function {
 /// call's own error.
 fn failure(sandbox: &AppSandbox, error: hyperlight_unikraft::Error) -> Error {
     let stderr = sandbox.drain_stderr();
-    // The driver's own last word on any failed call, which says nothing more
+    // The driver's own last word, which says nothing more: older images print it after every
+    // failed call, newer ones only when the driver itself fails
     let stderr = stderr
         .trim_end()
         .trim_end_matches("hl_driver: dispatch callback failed")

@@ -195,6 +195,53 @@ fn c_multi_binary_mount() {
     );
 }
 
+/// A file the exec driver cannot execute fails the call with 126, and the
+/// driver says which and why, as a shell does: the kernel keeps quiet
+/// about an execve that fails as a PATH search expects.
+#[test]
+fn c_unexecutable_file_says_why() {
+    let rootfs = require_rootfs("c");
+    let dir = temp_dir("c-not-elf");
+    let script = dir.path().join("not-elf");
+    std::fs::write(&script, "no shebang, no ELF\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(64)
+        .echo_output(false)
+        .mounts(vec![Mount::rw(dir.path(), "/mnt/x")])
+        .boot()
+        .unwrap();
+    assert!(matches!(
+        sandbox.run("/mnt/x/not-elf"),
+        Err(hyperlight_unikraft::Error::CallFailed { status: 126 })
+    ));
+    let stderr = sandbox.drain_stderr();
+    assert!(
+        stderr.contains("hl: cannot execute /mnt/x/not-elf: Exec format error"),
+        "{stderr:?}"
+    );
+    // A file without an execute bit is not run either, and says so: the
+    // mount carries the host's mode bits.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(matches!(
+            sandbox.run("/mnt/x/not-elf"),
+            Err(hyperlight_unikraft::Error::CallFailed { status: 126 })
+        ));
+        let stderr = sandbox.drain_stderr();
+        assert!(
+            stderr.contains("hl: cannot execute /mnt/x/not-elf: Permission denied"),
+            "{stderr:?}"
+        );
+    }
+}
+
 #[test]
 fn cpp_hello() {
     let output = run_bins("c", 64, &[], &["/mnt/bin/hello_cpp"]);
