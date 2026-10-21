@@ -20,8 +20,9 @@ from smolagents.monitoring import AgentLogger, LogLevel
 from smolagents.utils import AgentError
 from smolagents_hyperlight import HyperlightExecutor
 
+import mcp_server_hyperlight.server as server_module
 from mcp_server_hyperlight import Sandbox, build_server
-from mcp_server_hyperlight.server import MAX_RESULT_CHARS, _Call, _parse_args
+from mcp_server_hyperlight.server import MAX_RESULT_CHARS, _Call, _hluk_path, _parse_args
 
 
 require_run_all = pytest.mark.skipif(not os.getenv("RUN_ALL"), reason="requires RUN_ALL environment variable")
@@ -599,6 +600,103 @@ class TestTools:
         warm.join(5)
         assert FakeExecutor.instances[0].cleaned_up
         assert sandbox._executor is None
+
+
+class TestHlukLookup:
+    @staticmethod
+    def hluk_in(directory):
+        # An executable hluk, as the server looks for one: hluk.exe on Windows
+        directory.mkdir(parents=True, exist_ok=True)
+        hluk = directory / ("hluk.exe" if sys.platform == "win32" else "hluk")
+        hluk.touch()
+        hluk.chmod(0o755)
+        return hluk
+
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        # A machine with no hluk anywhere the server looks, as a client started from a desktop's launcher runs it:
+        # without the install directory on PATH
+        monkeypatch.setenv("PATH", "")
+        for name in ("HOME", "USERPROFILE", "LOCALAPPDATA"):
+            monkeypatch.setenv(name, str(tmp_path))
+        for name in ("HLUK_INSTALL_DIR", "CARGO_HOME"):
+            monkeypatch.delenv(name, raising=False)
+        assert _hluk_path() is None
+        return tmp_path
+
+    def test_hluk_from_the_install_directory(self, home):
+        installed = home / "hluk" / "bin" if sys.platform == "win32" else home / ".local" / "bin"
+        hluk = self.hluk_in(installed)
+        assert os.path.samefile(_hluk_path(), hluk)
+
+    def test_hluk_from_cargo(self, home, monkeypatch):
+        # As `cargo install hyperlight-unikraft` puts it, under CARGO_HOME or ~/.cargo
+        hluk = self.hluk_in(home / ".cargo" / "bin")
+        assert os.path.samefile(_hluk_path(), hluk)
+        monkeypatch.setenv("CARGO_HOME", str(home / "cargo"))
+        assert _hluk_path() is None
+        hluk = self.hluk_in(home / "cargo" / "bin")
+        assert os.path.samefile(_hluk_path(), hluk)
+
+    def test_hluk_from_the_chosen_install_directory(self, home, monkeypatch):
+        hluk = self.hluk_in(home / "bin")
+        monkeypatch.setenv("HLUK_INSTALL_DIR", str(home / "bin"))
+        assert os.path.samefile(_hluk_path(), hluk)
+        # Unexpanded, as a client's config gives it
+        monkeypatch.setenv("HLUK_INSTALL_DIR", os.path.join("~", "bin"))
+        assert os.path.samefile(_hluk_path(), hluk)
+        monkeypatch.setenv("HLUK_HOME_FOR_TEST", str(home))
+        monkeypatch.setenv("HLUK_INSTALL_DIR", os.path.join("$HLUK_HOME_FOR_TEST", "bin"))
+        assert os.path.samefile(_hluk_path(), hluk)
+        if sys.platform != "win32":
+            # One the executor could not run, as an install cut short leaves it: the executor says to install hluk
+            hluk.chmod(0o644)
+            assert _hluk_path() is None
+
+    def test_hluk_from_path_only_where_absolute(self, home, monkeypatch):
+        # A relative PATH entry names the current directory, which the client chose; Windows before Python 3.12 looks
+        # there first, whatever PATH says
+        monkeypatch.chdir(home)
+        self.hluk_in(home)
+        monkeypatch.setenv("PATH", os.pathsep.join([".", ""]))
+        assert _hluk_path() is None
+        hluk = self.hluk_in(home / "installed")
+        monkeypatch.setenv("PATH", os.pathsep.join([".", str(home / "installed")]))
+        assert os.path.samefile(_hluk_path(), hluk)
+
+    def test_hluk_never_from_the_current_directory(self, home, monkeypatch):
+        # A relative HLUK_INSTALL_DIR, or on Windows one without a drive or no LOCALAPPDATA: no path that the
+        # current directory or drive decides
+        monkeypatch.chdir(home)
+        self.hluk_in(home / "hluk" / "bin")
+        monkeypatch.setenv("HLUK_INSTALL_DIR", os.path.join("hluk", "bin"))
+        if sys.platform == "win32":
+            monkeypatch.delenv("LOCALAPPDATA")
+            assert _hluk_path() is None
+            monkeypatch.setenv("HLUK_INSTALL_DIR", "\\hluk\\bin")
+        assert _hluk_path() is None
+
+    def test_hluk_looked_up_for_each_guest(self, home, monkeypatch):
+        # One installed after a guest failed to start for want of it is found by the next
+        monkeypatch.setenv("HLUK_INSTALL_DIR", str(home))
+        seen = []
+        monkeypatch.setattr(server_module, "HyperlightExecutor", lambda **kwargs: seen.append(kwargs["hluk_path"]))
+        # What a client's user can do about it, in the server's options
+        with pytest.raises(RuntimeError, match="--hluk-path"):
+            server_module._make_executor(runtime="agent")
+        hluk = self.hluk_in(home)
+        server_module._make_executor(runtime="agent")
+        server_module._make_executor(hluk_path="/chosen/hluk", runtime="agent")
+        server_module._make_executor(hluk_path=os.path.join("~", "hluk"), runtime="agent")
+        assert os.path.samefile(seen[0], hluk)
+        assert seen[1] == "/chosen/hluk"
+        # As a client's config passes --hluk-path, unexpanded; but a file named as given is taken as it is
+        assert seen[2] == os.path.join(str(home), "hluk")
+        literal = home / "$NOT_A_VARIABLE"
+        literal.touch()
+        monkeypatch.setenv("NOT_A_VARIABLE", "elsewhere")
+        server_module._make_executor(hluk_path=str(literal), runtime="agent")
+        assert seen[3] == str(literal)
 
 
 class TestArguments:

@@ -149,8 +149,9 @@ class Sandbox:
     short of its own timeout, which always bounds how long one call holds the guest.
     """
 
-    def __init__(self, executor_factory: Callable[..., HyperlightExecutor] = HyperlightExecutor, **executor_kwargs):
-        self._executor_factory = executor_factory
+    def __init__(self, executor_factory: Callable[..., HyperlightExecutor] | None = None, **executor_kwargs):
+        # By default, one that finds hluk where it is installed, too
+        self._executor_factory = executor_factory or _make_executor
         self._executor_kwargs = executor_kwargs
         # On the standard error: the standard output is the MCP client's
         self._logger = AgentLogger(LogLevel.INFO, console=Console(stderr=True, highlight=False))
@@ -169,9 +170,9 @@ class Sandbox:
         if self._executor is None:
             try:
                 executor = self._executor_factory(logger=self._logger, **self._executor_kwargs)
-            # Exception: hluk_path names no program (FileNotFoundError), or hluk does not answer --version
-            # (TimeoutExpired), as well as a guest that would not start. The model hears why, and the next call tries
-            # again.
+            # Exception: hluk found nowhere (RuntimeError), hluk_path names no program (FileNotFoundError), or hluk
+            # does not answer --version (TimeoutExpired), as well as a guest that would not start. The model hears why,
+            # and the next call tries again.
             except Exception as e:
                 # hluk's and the guest's last output comes with it, up to 128 KiB
                 raise ToolError(_clip(str(e) or type(e).__name__, MAX_RESULT_CHARS)) from e
@@ -456,7 +457,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         metavar="SECONDS",
         help="longest to wait for the guest to start, its image's first pull included (300)",
     )
-    parser.add_argument("--hluk-path", help="the hluk binary (hluk on PATH)")
+    parser.add_argument("--hluk-path", help="the hluk binary (hluk on PATH, or in the install scripts' directory)")
     parser.add_argument(
         "--hluk-arg",
         action="append",
@@ -479,6 +480,67 @@ def _shut_down(sandbox: Sandbox, status: int):
     sandbox.close()
     _flush()
     os._exit(status)
+
+
+def _hluk_path() -> str | None:
+    """The hluk on PATH, or else where it is installed: `HLUK_INSTALL_DIR` or the install scripts' default, or Cargo's."""
+    # Each directory on PATH as _hluk_in takes it, so that a relative entry such as `.`, or Windows' search of the
+    # current directory first, cannot pick a hluk from wherever the client started the server
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if found := _hluk_in(directory):
+            return found
+    # A client started from a desktop's launcher, such as Claude Desktop on macOS, may run the server with a PATH
+    # that lacks the install directory
+    home = os.path.expanduser("~")
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        defaults = [local and os.path.join(local, "hluk", "bin")]
+    else:
+        defaults = [os.path.join(home, ".local", "bin")]
+    cargo = os.environ.get("CARGO_HOME") or os.path.join(home, ".cargo")
+    # As a client's config sets it, where no shell expands a ~ or a variable
+    chosen = os.environ.get("HLUK_INSTALL_DIR")
+    for directory in [
+        chosen and os.path.expanduser(os.path.expandvars(chosen)),
+        *defaults,
+        os.path.join(cargo, "bin"),
+    ]:
+        if installed := _hluk_in(directory):
+            return installed
+    # The executor then says how to install hluk
+    return None
+
+
+def _hluk_in(directory: str | None) -> str | None:
+    # Never a directory that the current directory or drive picks, where any hluk could be: one directory, absolute,
+    # with its drive on Windows. Not shutil.which, which splits a path on os.pathsep and, on Windows before Python
+    # 3.12, looks in the current directory first.
+    if (
+        not directory
+        or not os.path.isabs(directory)
+        or (sys.platform == "win32" and not os.path.splitdrive(directory)[0])
+    ):
+        return None
+    installed = os.path.join(directory, "hluk.exe" if sys.platform == "win32" else "hluk")
+    # One the executor can run: not one an install cut short leaves without its mode
+    return installed if os.path.isfile(installed) and os.access(installed, os.X_OK) else None
+
+
+def _make_executor(*, hluk_path: str | None = None, **kwargs) -> HyperlightExecutor:
+    # Looked up for each guest the server starts: a call after one that found no hluk finds one installed since
+    # Expanded as HLUK_INSTALL_DIR is, as a client's config passes --hluk-path with no shell to expand a ~ or a
+    # variable; unless it names a file as given, whose name may hold a $ or a %
+    if hluk_path and not os.path.isfile(hluk_path):
+        hluk_path = os.path.expanduser(os.path.expandvars(hluk_path))
+    hluk_path = hluk_path or _hluk_path()
+    if hluk_path is None:
+        # In the server's words: the executor's names its own keyword argument, which a client cannot pass
+        raise RuntimeError(
+            "Could not find the `hluk` binary on PATH, in HLUK_INSTALL_DIR, or where the install scripts or Cargo put "
+            "it: install it from https://github.com/hyperlight-dev/hyperlight-unikraft#install, or pass its location "
+            "with --hluk-path."
+        )
+    return HyperlightExecutor(hluk_path=hluk_path, **kwargs)
 
 
 def main(argv: list[str] | None = None):

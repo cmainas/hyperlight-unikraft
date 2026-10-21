@@ -83,7 +83,7 @@ Pass them after the command, e.g. `uvx mcp-server-hyperlight --net-allow pypi.or
 | `--runtime NAME` | `agent` | Published image to run, by name or full reference. |
 | `--initrd PATH` | | A rootfs CPIO of your own to run instead (it must have CPython 3). |
 | `--scratch-mb MIB` | the image's | Guest memory in MiB. |
-| `--hluk-path PATH` | `hluk` on `PATH` | |
+| `--hluk-path PATH` | `hluk` on `PATH` | Else where it is installed: `$HLUK_INSTALL_DIR`, the install scripts' `~/.local/bin` (`%LOCALAPPDATA%\hluk\bin` on Windows), or Cargo's `$CARGO_HOME/bin` (`~/.cargo/bin`), for a client that starts the server with another `PATH`. |
 | `--hluk-arg ARG` | | More arguments for `hluk run`, one per option: `--hluk-arg=--mount --hluk-arg=/data:/data:ro` mounts `/data` read-only. |
 | `--startup-timeout SECONDS` | 300 | Longest to wait for the guest; the first start pulls the image. |
 
