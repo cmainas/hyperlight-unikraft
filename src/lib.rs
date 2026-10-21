@@ -1985,7 +1985,13 @@ fn fstab_entries(mounts: &[Mount]) -> Result<String> {
         // 0x1.  ukopts: mkmp creates the mount point if missing.  No
         // quotes: uk_libparam does not strip them.
         let flags = if m.readonly { "0x1" } else { "0x0" };
-        write!(entries, "{i}:{}:hostfs:{flags}::mkmp", m.guest_path).unwrap();
+        // Without trailing slashes, as the kernel keeps a mount point:
+        // one with them would not match its own mount on a restore.
+        let path = match m.guest_path.trim_end_matches('/') {
+            "" => "/",
+            path => path,
+        };
+        write!(entries, "{i}:{path}:hostfs:{flags}::mkmp").unwrap();
     }
     if mounts.len() > MOUNTS_MAX || entries.len() > FSTAB_ENTRIES_MAX {
         return Err(Error::MountTable {
@@ -3541,6 +3547,12 @@ mod tests {
     #[test]
     fn fstab_single_rw_mount() {
         let arg = fstab_arg(&[Mount::rw("/tmp/share", "/mnt/host")]).unwrap();
+        assert_eq!(arg, " vfs.fstab=[0:/mnt/host:hostfs:0x0::mkmp]");
+    }
+
+    #[test]
+    fn fstab_mount_points_have_no_trailing_slash() {
+        let arg = fstab_arg(&[Mount::rw("/tmp/share", "/mnt/host//")]).unwrap();
         assert_eq!(arg, " vfs.fstab=[0:/mnt/host:hostfs:0x0::mkmp]");
     }
 
