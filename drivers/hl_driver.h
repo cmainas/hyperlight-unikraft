@@ -119,6 +119,12 @@ static inline int hl_driver_init(const char *name)
 {
 	uint64_t cap = 0;
 
+	/* Standard output a line at a time, as on a terminal, whether the
+	 * console is one or not: off a terminal libc buffers it whole, and a
+	 * call's standard error, unbuffered, would come out before what it
+	 * printed to standard output before it. */
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
 	/* Read to receive calls, write to report how one went.  Close-on-exec:
 	 * a program the driver runs must not hold the call queue. */
 	g_hl_call_fd = open(HL_CALL_DEVICE, O_RDWR | O_CLOEXEC);

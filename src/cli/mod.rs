@@ -1018,6 +1018,13 @@ pub fn run(args: RunArgs) -> CliResult<()> {
         builder = builder.resolv_conf(rc);
     }
 
+    // A terminal for the guest from boot, unless the boot ends in a warm
+    // snapshot, whose runtime must not keep what this process's console
+    // happens to be.  An entry-point program, with no driver, is the
+    // workload, and runs during the boot: it has one either way, and one
+    // that is still running when the snapshot is taken (a server) keeps
+    // what it made of this run's console.
+    builder = builder.console_terminal(!saving_warm || !driver);
     let t = Instant::now();
     let mut sandbox = boot(builder)?;
     info!(elapsed_ms = elapsed_ms(t), restored, "boot");

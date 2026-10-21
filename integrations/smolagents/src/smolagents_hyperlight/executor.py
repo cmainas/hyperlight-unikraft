@@ -61,8 +61,9 @@ _HYPERLIGHT_GUEST_SERVER_CODE = dedent(
     # The console, for the steps and their replies, and for this script's own errors, before the step's own streams
     # take its descriptors. Descriptors made by os.dup are not inherited, so subprocesses never hold it.
     requests_fd, replies_fd, errors_fd = os.dup(0), os.dup(1), os.dup(2)
-    # The console echoes what it reads, as a terminal does. A guest that kept echoing would still work, as the executor
-    # only takes the lines marked as replies, but every step would come back to it.
+    # The console of older hluk releases echoes what it reads, as a terminal does; a newer one, piped, is no terminal and
+    # refuses this. A guest that kept echoing would still work, as the executor only takes the lines marked as replies,
+    # but every step would come back to it.
     try:
         attributes = termios.tcgetattr(requests_fd)
         attributes[3] &= ~termios.ECHO

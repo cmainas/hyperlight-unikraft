@@ -1078,6 +1078,9 @@ struct Console {
     limit: usize,
     /// Whether the output also goes to this process's stdout and stderr.
     echo: bool,
+    /// Whether the guest may see its console as a terminal, where this
+    /// process's stdio is one ([`AppSandbox::console_terminal`]).
+    terminal: std::sync::atomic::AtomicBool,
     /// Standard output and standard error, in the order written.
     output: Mutex<Capture>,
     /// Standard error alone.
@@ -1089,10 +1092,11 @@ struct Console {
 }
 
 impl Console {
-    fn new(limit: usize, echo: bool) -> Self {
+    fn new(limit: usize, echo: bool, terminal: bool) -> Self {
         Self {
             limit,
             echo,
+            terminal: terminal.into(),
             output: Mutex::default(),
             stderr: Mutex::default(),
             decoders: Mutex::default(),
@@ -1155,7 +1159,7 @@ impl Console {
 
 impl Default for Console {
     fn default() -> Self {
-        Self::new(usize::MAX, true)
+        Self::new(usize::MAX, true, false)
     }
 }
 
@@ -1579,6 +1583,32 @@ impl GuestConfig {
                 let n = std::io::stdin().read(&mut data).unwrap_or(0);
                 data.truncate(n);
                 Ok(data)
+            },
+        )?;
+
+        // ── Terminal ──────────────────────────────────────────────
+        // Whether the guest's console is a terminal, which programs ask
+        // (isatty) to choose colours, prompts and buffering.  Stream 0 is
+        // its input and output, one file in the guest: a terminal only
+        // where this process's stdin is one and the output reaches one.
+        // Stream 1 is its standard error.  Never before the embedder says
+        // ([`AppSandbox::console_terminal`]), and asked each time, so a
+        // restored guest answers for the run that restored it.
+        let console = self.console.clone();
+        let prof = self.profile.clone();
+        target.register_host_function(
+            "ConsoleIsTerminal",
+            move |stream: i32| -> hyperlight_host::Result<i32> {
+                let _profile = prof.host("ConsoleIsTerminal");
+                use std::io::IsTerminal;
+                let terminal = console.echo
+                    && console.terminal.load(std::sync::atomic::Ordering::Relaxed)
+                    && match stream {
+                        0 => std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+                        1 => std::io::stderr().is_terminal(),
+                        _ => false,
+                    };
+                Ok(i32::from(terminal))
             },
         )?;
 
@@ -2177,6 +2207,7 @@ pub struct SandboxBuilder {
     host_write_err: bool,
     output_limit: usize,
     echo_output: bool,
+    console_terminal: bool,
 }
 
 impl SandboxBuilder {
@@ -2198,6 +2229,7 @@ impl SandboxBuilder {
             host_write_err: true,
             output_limit: usize::MAX,
             echo_output: true,
+            console_terminal: false,
         }
     }
 
@@ -2405,6 +2437,13 @@ impl SandboxBuilder {
         self
     }
 
+    /// Whether the guest may see its console as a terminal from the start
+    /// (see [`AppSandbox::console_terminal`]); off by default.
+    pub fn console_terminal(mut self, on: bool) -> Self {
+        self.console_terminal = on;
+        self
+    }
+
     /// Leave out the `HostWriteErr` host function, as an older or
     /// third-party host does: the guest's standard error then reaches
     /// `HostWrite`.  For testing that fallback, on a fresh boot: a snapshot
@@ -2438,6 +2477,7 @@ impl SandboxBuilder {
             host_write_err,
             output_limit,
             echo_output,
+            console_terminal,
         } = self;
         // The empty name asks for the list of functions, one per line, so
         // neither it nor a line break can be in a function's name.
@@ -2474,7 +2514,7 @@ impl SandboxBuilder {
                     listen_ports,
                     host_functions,
                     host_write_err,
-                    Console::new(output_limit, echo_output),
+                    Console::new(output_limit, echo_output, console_terminal),
                 )?;
                 if let Some(on) = profile {
                     cfg.profile.set_enabled(on);
@@ -2526,7 +2566,7 @@ impl SandboxBuilder {
                     listen_ports,
                     host_functions,
                     host_write_err,
-                    Console::new(output_limit, echo_output),
+                    Console::new(output_limit, echo_output, console_terminal),
                 )?;
                 // Before the boot: the kernel fetches the environment once
                 // on its way to main(), so an entry-point program starts
@@ -3045,6 +3085,19 @@ impl AppSandbox {
     /// restored guest alike.
     pub fn has_driver(&self) -> bool {
         self.config.has_driver()
+    }
+
+    /// Let the guest see its console as a terminal where this process's
+    /// stdio is one and the output is echoed to it, or not.  Off until
+    /// turned on ([`SandboxBuilder::console_terminal`]): what a runtime
+    /// decides about its console at boot, in a call before a snapshot, and
+    /// so in the snapshot, is then the same whatever process made it.  Turn
+    /// it on for the workload whose output a person reads.
+    pub fn console_terminal(&self, on: bool) {
+        self.config
+            .console
+            .terminal
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Take the guest output captured so far: standard output and

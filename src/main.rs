@@ -518,6 +518,9 @@ fn drive(
     exec: Exec,
     call: Option<Call>,
 ) -> CliResult<()> {
+    // The workload is what a person runs hluk for: its console is a
+    // terminal where hluk's is.
+    sandbox.console_terminal(true);
     let t = Instant::now();
     if (!no_workload || call.is_some()) && !sandbox.has_driver() {
         return Err(

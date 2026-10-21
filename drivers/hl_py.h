@@ -649,6 +649,13 @@ static inline __attribute__((noreturn)) void hl_py_serve(void)
 	if (!m)
 		PyErr_Print();
 	Py_XDECREF(m);
+	/* Standard output a line at a time, as a terminal has it, whether
+	 * the console is one or not: Python picks block buffering for a
+	 * console that is not, then writes standard error before what a
+	 * call printed to standard output before it.  Whatever the console
+	 * was at start-up, so a warm snapshot keeps the same. */
+	(void)PyRun_SimpleString("import sys\n"
+				 "sys.stdout.reconfigure(line_buffering=True)\n");
 	/* Learn the host's environment while it is still the one the
 	 * interpreter started with, so a variable it gave at boot is known
 	 * for the host's, whatever it sends before the first call. */

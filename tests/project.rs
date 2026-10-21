@@ -400,8 +400,8 @@ fn the_bash_repl_template_runs_each_line_until_end_of_input() {
     let project = init_local(root.path(), cache.path(), "repl", "bash-repl", "bash");
     // State carries from line to line, and a last line with no newline
     // still runs before the loop stops at end of input.
-    // Each check looks for output the command's own text does not contain,
-    // since the input is echoed back next to it.
+    // Each check looks for output the command's own text does not contain.
+    // Piped in, the input is not echoed and no prompt is printed.
     let input = b"X=4\ncd /etc\necho x=$X\npwd\necho $((6 * 7))";
     let out = hluk_stdin(&project, cache.path(), &["run"], input);
     assert!(out.status.success(), "run failed: {}", text(&out));
