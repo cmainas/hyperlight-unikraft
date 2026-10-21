@@ -1483,6 +1483,9 @@ conformance runtime *modules:
     if [ -f "$manifest" ]; then
         skip_list=$(grep -E '^[[:space:]]+"test_[^"]+"' "$manifest" | sed 's/.*"\(test_[^"]*\)".*/\1/')
     fi
+    # And CONFORMANCE_SKIP's, space-separated: modules a host's network or
+    # setup fails, not the guest, which still run everywhere else.
+    for mod in ${CONFORMANCE_SKIP:-}; do skip_list=$(printf '%s\n%s' "$skip_list" "$mod"); done
     skip_count=$(printf '%s' "$skip_list" | grep -c . || true)
 
     # timeout(1), where there is one (not on macOS): SIGTERM after 60
@@ -1588,6 +1591,7 @@ conformance runtime *modules:
     if (Test-Path $manifest) {
         foreach ($m in [regex]::Matches((Get-Content -Raw $manifest), '(?m)^\s+"(test_[^"]+)"')) { $skip[$m.Groups[1].Value] = $true }
     }
+    if ($env:CONFORMANCE_SKIP) { foreach ($mod in -split $env:CONFORMANCE_SKIP) { $skip[$mod] = $true } }
 
     $pass = 0; $fail = 0; $err = 0; $skipped = 0; $crash = 0; $total = 0
     Write-Output "==> Running $($testModules.Count) modules ($($skip.Count) in skip list)"
