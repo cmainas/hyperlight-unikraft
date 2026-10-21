@@ -240,10 +240,31 @@ const RANDOM_BYTES_MAX: u64 = 4096;
 /// GPA where the initrd is mapped via `map_file_cow`.
 ///
 /// Past the x86 LAPIC MMIO page (0xFEE0_0000) to avoid collisions
-/// with KVM's in-kernel IRQCHIP reservation.  On arm64 nothing sits
-/// there; the address is aligned for HVF's 16 KiB pages and well inside
-/// its 36-bit guest physical space.
+/// with KVM's in-kernel IRQCHIP reservation.
+#[cfg(target_arch = "x86_64")]
 const INITRD_MAP_BASE: u64 = 0xFEF0_0000;
+
+/// GPA where the initrd is mapped via `map_file_cow`.
+///
+/// At 4 GiB, above the guest physical ranges hyperlight-host gives WHP's
+/// emulated GIC (`hyperlight_common::layout`: the distributor sits at
+/// 0xFFFF_0000, so an initrd mapped just below 4 GiB reads GIC registers
+/// past its first ~17 MiB).  Aligned for HVF's 16 KiB pages, and far
+/// below the scratch region at the top of the 36-bit guest physical space.
+#[cfg(target_arch = "aarch64")]
+const INITRD_MAP_BASE: u64 = 0x1_0000_0000;
+
+// Clear of WHP's GIC: the ITS translator and distributor take 64 KiB
+// each, the one vCPU's redistributor 128 KiB.
+#[cfg(target_arch = "aarch64")]
+const _: () = {
+    use hyperlight_common::layout::{
+        WHP_GICD_BASE_GPA, WHP_GICR_BASE_GPA, WHP_GITS_TRANSLATOR_BASE_GPA,
+    };
+    assert!(INITRD_MAP_BASE >= WHP_GITS_TRANSLATOR_BASE_GPA + 0x1_0000);
+    assert!(INITRD_MAP_BASE >= WHP_GICR_BASE_GPA + 0x2_0000);
+    assert!(INITRD_MAP_BASE >= WHP_GICD_BASE_GPA + 0x1_0000);
+};
 
 /// Scratch memory in MiB for a guest with no initrd to size from (a
 /// native kernel), and the fallback when the initrd cannot be read.  A

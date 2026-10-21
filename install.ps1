@@ -20,7 +20,14 @@ $dir = if ($env:HLUK_INSTALL_DIR) { $env:HLUK_INSTALL_DIR } else { Join-Path $en
 
 $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
 if ($arch -ne 'X64') {
-    throw "no prebuilt hluk for Windows/${arch}: ``cargo install hyperlight-unikraft`` builds it from source"
+    # No release yet boots guests on Windows arm64, so build main there;
+    # ring needs clang on that target.
+    $build = if ($arch -eq 'Arm64') {
+        "``git clone https://github.com/$repo``, then ``cargo install --locked --path .`` inside it, builds it from main, with Visual Studio's clang (its C++ Clang component, VC\Tools\Llvm\ARM64\bin) on the PATH"
+    } else {
+        "``cargo install hyperlight-unikraft`` builds it from source"
+    }
+    throw "no prebuilt hluk for Windows/${arch}: $build"
 }
 $target = 'x86_64-pc-windows-msvc'
 
