@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A `sendto` on a connected TCP socket was judged by the address it named, though the data goes to the socket's peer: a guest connected to a resolver on port 53 could send anything there by naming an address the policy allows, past the check of its DNS questions. A `sendto` on a stream socket is a `send` to its peer now, checked as one.
 - A guest under a block list could reach the host's loopback services through the unspecified address: a connect to `0.0.0.0` or `::` goes to loopback on Linux, and only `127.0.0.0/8` and `::1` were refused. The lists and a filter refuse the unspecified address too.
 - No guest booted on Windows arm64 (#166): hyperlight-host puts WHP's emulated interrupt controller at guest physical addresses just below 4 GiB, and the initrd, mapped at `0xFEF0_0000`, ran into them past its first 17 MiB. The arm64 initrd is mapped at 4 GiB now; x86 keeps its address.
 - arm64 guests under nested Hyper-V (Windows arm64 runners) crashed at random, or read zeros where they had just written: the kernel mapped the pages it allocates at run time (heap, `mmap`, file pages) Non-shareable, which the CPU does not keep coherent across processors. They are Inner Shareable now, as the boot mappings were.
