@@ -41,7 +41,10 @@ mod hostnet;
 pub mod net_policy;
 mod profile;
 
-pub use net_policy::{AllowList, BlockList, ListenPorts, NetworkPolicy, ResolveError};
+pub use net_policy::{
+    AllowList, BlockList, Destination, Filter, ListenPorts, NetworkFilter, NetworkPolicy,
+    ResolveError,
+};
 pub use profile::Profile;
 
 // ── Errors ──────────────────────────────────────────────────────────────
@@ -2381,10 +2384,10 @@ impl SandboxBuilder {
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
-        // A guest that may reach only listed names must still be able to
-        // ask the resolver it was given.
-        if let (Some(rc), Some(NetworkPolicy::AllowList(al))) = (&resolv_conf, &network) {
-            al.exempt_resolvers(net_policy::resolv_conf_nameservers(rc));
+        // A guest that may reach only some names must still be able to ask
+        // the resolver it was given.
+        if let (Some(rc), Some(policy)) = (&resolv_conf, &network) {
+            policy.exempt_resolvers(net_policy::resolv_conf_nameservers(rc));
         }
         let (sandbox, cfg) = match snapshot {
             Some(snapshot) => {

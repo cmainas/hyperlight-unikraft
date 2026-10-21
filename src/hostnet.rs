@@ -609,16 +609,21 @@ impl Net {
     }
 
     fn send(&self, fd: i32, data: &[u8]) -> Res<usize> {
-        let mut tbl = self.table();
         // A DNS question on a socket connected to port 53: the name is
-        // checked here, where it still is one (see `NetworkPolicy::allows_query`).
-        let meta = tbl.meta(fd)?;
+        // checked here, where it still is one (see `NetworkPolicy::allows_query`),
+        // with the table unlocked, as the check may ask the embedder's filter.
+        let meta = self.table().meta(fd)?;
         if meta.peer.is_some_and(|p| p.port() == 53)
             && !self
                 .policy
                 .as_ref()
                 .is_some_and(|p| p.allows_query(dns_message(data, meta.udp)))
         {
+            return Err(errno::EACCES);
+        }
+        let mut tbl = self.table();
+        // Checked for the peer it had then; one connected since is not.
+        if tbl.meta(fd)?.peer != meta.peer {
             return Err(errno::EACCES);
         }
         let r = net::send(tbl.get(fd)?, data, send_flags()).map_err(from_rustix);
@@ -628,6 +633,14 @@ impl Net {
 
     fn sendto(&self, fd: i32, data: &[u8], addr: SocketAddr) -> Res<usize> {
         let udp = self.table().meta(fd)?.udp;
+        // A stream socket sends to its peer whatever address sendto names
+        // (Linux and Windows ignore it), so checking `addr` would check the
+        // wrong destination: a guest connected to a resolver on port 53
+        // could name an allowed address and send anything there.  The peer
+        // was checked at the connect; `send` checks a DNS question to it.
+        if !udp {
+            return self.send(fd, data);
+        }
         self.allow_outbound(&addr, udp)?;
         // A DNS question sent unconnected: the same name check as `send`.
         if addr.port() == 53
@@ -660,7 +673,10 @@ impl Net {
         let mut buf = vec![0u8; len.min(HOST_CALL_MAX - RECVFROM_HDR)];
         let tbl = self.table();
         let fd = tbl.get(fd)?;
-        let (n, _, from) = match net::recvfrom(fd, &mut buf[..], RecvFlags::empty()) {
+        let received = net::recvfrom(fd, &mut buf[..], RecvFlags::empty());
+        // Classified with the socket still held; the answer is learned
+        // from after the table is unlocked, as that may ask the filter.
+        let (n, _, from) = match received {
             Ok(r) => r,
             // Windows surfaces an earlier ICMP "port unreachable" on a UDP
             // socket as a reset.  Linux reports that as ECONNREFUSED on a
@@ -676,6 +692,7 @@ impl Net {
             }
             Err(e) => return Err(from_rustix(e)),
         };
+        drop(tbl);
         buf.truncate(n);
         let from = from.and_then(|a| SocketAddr::try_from(a).ok());
         // A DNS answer: under an allow list, the addresses it gives for a
@@ -1712,6 +1729,70 @@ mod tests {
         let (ready, rev) = net.poll(&[(idle, POLLIN), (42, POLLIN)], -1);
         assert!(t.elapsed() < Duration::from_secs(1));
         assert_eq!((ready, rev), (1, vec![0, POLLNVAL]));
+    }
+
+    /// The filter decides a DNS question sent on a connected socket with
+    /// the socket table unlocked: it is the embedder's code.
+    #[test]
+    fn filters_decide_connected_dns_sends_unlocked() {
+        use std::sync::OnceLock;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use crate::net_policy::{Destination, Filter, NetworkFilter};
+
+        struct Probe {
+            net: Arc<OnceLock<Arc<Net>>>,
+            asked_unlocked: Arc<AtomicBool>,
+        }
+        impl NetworkFilter for Probe {
+            fn allows_name(&self, _: &str) -> bool {
+                let unlocked = self.net.get().is_some_and(|n| n.table.try_lock().is_ok());
+                self.asked_unlocked.store(unlocked, Ordering::SeqCst);
+                true
+            }
+            fn allows(&self, _: &Destination<'_>) -> bool {
+                true
+            }
+        }
+
+        let cell = Arc::new(OnceLock::new());
+        let asked_unlocked = Arc::new(AtomicBool::new(false));
+        let filter = Filter::new(Probe {
+            net: cell.clone(),
+            asked_unlocked: asked_unlocked.clone(),
+        });
+        let net = Arc::new(Net::new(NetworkPolicy::Filter(filter), None));
+        cell.set(net.clone()).ok();
+        let u = udp(&net);
+        // A documentation address: connecting a datagram socket sends
+        // nothing, and what is sent after goes nowhere.
+        net.connect(u, "192.0.2.1:53".parse().unwrap()).unwrap();
+        let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        query.extend_from_slice(b"\x07example\x03com\x00\x00\x01\x00\x01");
+        let _ = net.send(u, &query);
+        assert!(asked_unlocked.load(Ordering::SeqCst));
+    }
+
+    /// A sendto on a connected stream socket goes to its peer, and is
+    /// judged by it, not by the address it names.
+    #[test]
+    fn stream_sendto_goes_to_and_is_judged_by_the_peer() {
+        use std::io::Read as _;
+        let net = Net::new(NetworkPolicy::AllowAll, None);
+        let listener = std::net::TcpListener::bind(loopback(0)).unwrap();
+        let s = tcp(&net);
+        match net.connect(s, listener.local_addr().unwrap()) {
+            Ok(()) | Err(errno::EINPROGRESS) => {}
+            Err(e) => panic!("connect: {e}"),
+        }
+        let (mut peer, _) = listener.accept().unwrap();
+        wait(&net, s, POLLOUT);
+        // An address every policy refuses: what is named does not matter.
+        let metadata: SocketAddr = "169.254.169.254:80".parse().unwrap();
+        assert_eq!(net.sendto(s, b"hi", metadata), Ok(2));
+        let mut got = [0u8; 2];
+        peer.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"hi");
     }
 
     #[test]

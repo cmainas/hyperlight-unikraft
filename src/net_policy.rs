@@ -8,6 +8,8 @@
 //! - [`NetworkPolicy::AllowAll`] — all outbound connections permitted.
 //! - [`NetworkPolicy::AllowList`] — only listed hosts/IPs permitted.
 //! - [`NetworkPolicy::BlockList`] — all except listed hosts/IPs permitted.
+//! - [`NetworkPolicy::Filter`] — the embedder's [`NetworkFilter`] decides,
+//!   by name and port, each time it is asked.
 //!
 //! All variants refuse the cloud metadata addresses unconditionally: the
 //! link-local ranges (169.254.0.0/16, fe80::/10), where Azure, AWS and GCP
@@ -15,9 +17,10 @@
 //! fd00:ec2::254, which is a unique local address rather than a
 //! link-local one.
 //!
-//! [`AllowList`] and [`BlockList`] additionally block loopback (127.0.0.0/8,
-//! ::1) because in the hostsock model a guest socket is a real host socket,
-//! and host-local services trust loopback without authentication.
+//! [`AllowList`], [`BlockList`] and [`Filter`] additionally block loopback (127.0.0.0/8,
+//! ::1), and the unspecified address (0.0.0.0, ::), which a connect sends
+//! to loopback, because in the hostsock model a guest socket is a real host
+//! socket, and host-local services trust loopback without authentication.
 //! [`NetworkPolicy::AllowAll`] permits loopback to support intra-guest server+client
 //! patterns (both endpoints are guest sockets on the host's loopback).
 //!
@@ -34,7 +37,8 @@
 //!   ask never obtains the address.
 //! - **The answer** (`learn_from_dns_answer`): under an allow list the
 //!   addresses the guest was told for a listed name are recorded, so the
-//!   connect that follows is recognised.
+//!   connect that follows is recognised; under a filter, with the name
+//!   they were given for, which the filter is asked about at the connect.
 //! - **The destination** (`allows`): the address of every connect and
 //!   sendto.  An allow list allows only what was listed, resolved when the
 //!   list was built, or recorded from an answer; nothing is resolved on the
@@ -50,7 +54,7 @@
 //! cannot refuse an address it was never shown to belong to the name.  An
 //! embedder who needs a guarantee lists what is allowed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -91,6 +95,7 @@ const AWS_IMDS_V6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254)
 /// refuse every `socket()` with `EACCES`.  Callers opt in via the library
 /// API or the `--net` CLI flag.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum NetworkPolicy {
     /// All outbound connections are allowed (no filtering).
     AllowAll,
@@ -98,6 +103,8 @@ pub enum NetworkPolicy {
     AllowList(AllowList),
     /// All connections are allowed *except* to the listed destinations.
     BlockList(BlockList),
+    /// The embedder's [`NetworkFilter`] decides, by name and port.
+    Filter(Filter),
 }
 
 impl NetworkPolicy {
@@ -115,51 +122,93 @@ impl NetworkPolicy {
             // AllowAll — no filtering (loopback permitted for intra-guest
             // server+client patterns in the hostsock model).
             NetworkPolicy::AllowAll => true,
-            // AllowList/BlockList — also block loopback.  Host services
-            // trust loopback without auth, and in the hostsock model a
-            // guest socket is a real host socket, so a guest connecting to
-            // 127.0.0.1 reaches host-only services.
+            // AllowList/BlockList/Filter — also block loopback.  Host
+            // services trust loopback without auth, and in the hostsock
+            // model a guest socket is a real host socket, so a guest
+            // connecting to 127.0.0.1 reaches host-only services.
             NetworkPolicy::AllowList(al) => {
-                !ip.is_loopback()
-                    && (al.is_allowed(&ip) || (udp && addr.port() == 53 && al.is_resolver(&ip)))
+                !is_host_local(&ip)
+                    && (al.is_allowed(&ip)
+                        || (udp && addr.port() == 53 && al.resolvers.contains(&ip)))
             }
-            NetworkPolicy::BlockList(bl) => !ip.is_loopback() && !bl.blocks(&ip),
+            NetworkPolicy::BlockList(bl) => !is_host_local(&ip) && !bl.blocks(&ip),
+            NetworkPolicy::Filter(f) => {
+                !is_host_local(&ip) && f.allows(SocketAddr::new(ip, addr.port()), udp)
+            }
         }
     }
 
     /// Whether the guest may send `data`, a DNS message bound for port 53.
     /// Under an allow list every question must name a listed host; under a
-    /// block list none may name a blocked one.  Anything that is not a
-    /// well-formed query is refused under either: nothing else has
-    /// business on port 53.
+    /// block list none may name a blocked one; under a filter it must
+    /// allow every name asked.  Anything that is not a well-formed query
+    /// is refused under any of them: nothing else has business on port 53.
     pub(crate) fn allows_query(&self, data: &[u8]) -> bool {
-        let names = match self {
-            NetworkPolicy::AllowAll => return true,
-            NetworkPolicy::AllowList(al) => &al.hostnames,
-            NetworkPolicy::BlockList(bl) => &bl.hostnames,
-        };
+        if let NetworkPolicy::AllowAll = self {
+            return true;
+        }
         let Some(questions) = dns_question_names(data) else {
             return false;
         };
         match self {
             NetworkPolicy::AllowAll => true,
-            NetworkPolicy::AllowList(_) => questions.iter().all(|q| names_contain(names, q)),
-            NetworkPolicy::BlockList(_) => !questions.iter().any(|q| names_contain(names, q)),
+            NetworkPolicy::AllowList(al) => {
+                questions.iter().all(|q| names_contain(&al.hostnames, q))
+            }
+            NetworkPolicy::BlockList(bl) => {
+                !questions.iter().any(|q| names_contain(&bl.hostnames, q))
+            }
+            NetworkPolicy::Filter(f) => questions.iter().all(|q| f.allows_name(&normalize_name(q))),
         }
     }
 
-    /// Record, under an allow list, the addresses a DNS answer gives for a
-    /// listed name, so the connect that follows is recognised.  Only an
-    /// answer from a resolver the guest may ask counts: a datagram from
-    /// anywhere else claiming to be one teaches nothing.
+    /// Record the addresses a DNS answer gives for a name the policy lets
+    /// the guest reach, so the connect that follows is recognised: under
+    /// an allow list, for a listed name; under a filter, for any name it
+    /// allows, with the name, which the filter is asked about at the
+    /// connect.  Only an answer from a resolver the guest may ask counts: a
+    /// datagram from anywhere else claiming to be one teaches nothing.
     pub(crate) fn learn_from_dns_answer(&self, from: SocketAddr, data: &[u8]) {
-        if let NetworkPolicy::AllowList(al) = self
-            && from.port() == 53
-            && al.is_resolver(&canonical(from.ip()))
-        {
-            learn_ips_from_dns_response(data, al);
+        if from.port() != 53 {
+            return;
+        }
+        let from = canonical(from.ip());
+        match self {
+            NetworkPolicy::AllowList(al) if al.resolvers.contains(&from) => {
+                if let Some((name, ips)) = dns_answer_ips(data)
+                    && names_contain(&al.hostnames, &name)
+                {
+                    ips.into_iter().for_each(|ip| al.learn_ip(ip));
+                }
+            }
+            NetworkPolicy::Filter(f) if f.resolvers.contains(&from) => {
+                if let Some((name, ips)) = dns_answer_ips(data) {
+                    let name = normalize_name(&name);
+                    if f.allows_name(&name) {
+                        f.learn(&name, ips);
+                    }
+                }
+            }
+            _ => {}
         }
     }
+
+    /// Also let the guest ask DNS of `ips`, the nameservers of the
+    /// `resolv.conf` it was given, under the policies that limit which
+    /// resolvers it may ask.
+    pub(crate) fn exempt_resolvers(&self, ips: Vec<IpAddr>) {
+        match self {
+            NetworkPolicy::AllowList(al) => al.exempt_resolvers(ips),
+            NetworkPolicy::Filter(f) => f.exempt_resolvers(ips),
+            NetworkPolicy::AllowAll | NetworkPolicy::BlockList(_) => {}
+        }
+    }
+}
+
+/// A name as a DNS question spells it, the way a [`NetworkFilter`] is
+/// given it: in lower case, without the trailing dot.
+fn normalize_name(name: &str) -> String {
+    name.trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Whether `name`, as a DNS question spells it, is one of `names`: the
@@ -177,6 +226,13 @@ fn canonical(ip: IpAddr) -> IpAddr {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
         v4 => v4,
     }
+}
+
+/// Whether a connection to `ip` stays on the host: loopback, or the
+/// unspecified address (`0.0.0.0`, `::`), which a connect sends to
+/// loopback.
+fn is_host_local(ip: &IpAddr) -> bool {
+    ip.is_loopback() || ip.is_unspecified()
 }
 
 /// Whether `ip` is a cloud metadata address, refused under every policy:
@@ -272,9 +328,7 @@ pub struct AllowList {
     allowed_ips: HashSet<IpAddr>,
     hostnames: Vec<String>,
     learned_ips: Arc<Mutex<HashSet<IpAddr>>>,
-    /// Resolvers the guest was given (its `/etc/resolv.conf`), exempt on
-    /// port 53 like the host's own.
-    resolvers: Arc<Mutex<HashSet<IpAddr>>>,
+    resolvers: Resolvers,
 }
 
 impl AllowList {
@@ -289,7 +343,7 @@ impl AllowList {
             allowed_ips,
             hostnames,
             learned_ips: Arc::new(Mutex::new(HashSet::new())),
-            resolvers: Arc::new(Mutex::new(HashSet::new())),
+            resolvers: Resolvers::default(),
         })
     }
 
@@ -299,26 +353,14 @@ impl AllowList {
             allowed_ips: HashSet::new(),
             hostnames: Vec::new(),
             learned_ips: Arc::new(Mutex::new(HashSet::new())),
-            resolvers: Arc::new(Mutex::new(HashSet::new())),
+            resolvers: Resolvers::default(),
         }
     }
 
     /// Also treat `ips` as DNS resolvers the guest may ask: the nameservers
     /// of the `resolv.conf` it was given (see `resolv_conf_nameservers`).
     pub fn exempt_resolvers(&self, ips: impl IntoIterator<Item = IpAddr>) {
-        if let Ok(mut resolvers) = self.resolvers.lock() {
-            resolvers.extend(ips.into_iter().map(canonical));
-        }
-    }
-
-    /// Whether `ip` is a resolver the guest may ask on port 53: the host's
-    /// own, a well-known public one, or one the guest was given.
-    fn is_resolver(&self, ip: &IpAddr) -> bool {
-        dns_resolvers().contains(ip)
-            || self
-                .resolvers
-                .lock()
-                .is_ok_and(|resolvers| resolvers.contains(ip))
+        self.resolvers.extend(ips);
     }
 
     fn is_allowed(&self, ip: &IpAddr) -> bool {
@@ -337,6 +379,168 @@ impl AllowList {
         {
             learned.insert(ip);
         }
+    }
+}
+
+// ── Resolvers ──────────────────────────────────────────────────────
+
+/// The resolvers a guest may ask on port 53 under an allow list or a
+/// filter: the host's own, the well-known public ones, and those the guest
+/// was given (its `/etc/resolv.conf`).
+#[derive(Clone, Debug, Default)]
+struct Resolvers(Arc<Mutex<HashSet<IpAddr>>>);
+
+impl Resolvers {
+    fn extend(&self, ips: impl IntoIterator<Item = IpAddr>) {
+        if let Ok(mut resolvers) = self.0.lock() {
+            resolvers.extend(ips.into_iter().map(canonical));
+        }
+    }
+
+    fn contains(&self, ip: &IpAddr) -> bool {
+        dns_resolvers().contains(ip) || self.0.lock().is_ok_and(|given| given.contains(ip))
+    }
+}
+
+// ── Filter ─────────────────────────────────────────────────────────
+
+/// Most names recorded for one address.  Hosts behind one CDN share
+/// addresses; past this the first names seen are the ones that count.
+const MAX_NAMES_PER_IP: usize = 16;
+
+/// Decides what a guest under [`NetworkPolicy::Filter`] may reach.
+///
+/// The guest resolves names itself and connects to addresses, so the host
+/// sees a name only in a DNS question.  The filter is asked twice:
+/// whether the guest may ask about a name ([`allows_name`]), and whether
+/// it may connect or send to an address ([`allows`]), given the names DNS
+/// told it the address belongs to.  Both are asked each time, so a filter
+/// whose answers change (an allow list the embedder edits while the guest
+/// runs) takes effect at the next question or connect, without a re-boot.
+///
+/// Both run while the guest is stopped in a host call: they should answer
+/// from memory, not the network, and must not call into the sandbox.  A
+/// panic in either counts as a refusal.  `allows_name` is asked again when
+/// an answer arrives, before its addresses are credited to the name, so it
+/// may be asked more than once per lookup.  Loopback, the unspecified
+/// address and the cloud metadata addresses are refused before the filter
+/// is asked, and questions to the resolvers an allow list exempts are
+/// allowed, as under [`NetworkPolicy::AllowList`].
+///
+/// [`allows_name`]: NetworkFilter::allows_name
+/// [`allows`]: NetworkFilter::allows
+pub trait NetworkFilter: Send + Sync {
+    /// Whether the guest may ask DNS about `name`, in lower case and
+    /// without a trailing dot.  A name refused here is never resolved, so
+    /// the guest has no address for it.
+    fn allows_name(&self, name: &str) -> bool;
+
+    /// Whether the guest may connect or send to `destination`.
+    fn allows(&self, destination: &Destination<'_>) -> bool;
+}
+
+/// A destination a [`NetworkFilter`] is asked about.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct Destination<'a> {
+    /// The address, IPv4-mapped IPv6 given as IPv4.
+    pub addr: SocketAddr,
+    /// Whether the socket is a UDP one.
+    pub udp: bool,
+    /// The names the guest was told `addr` belongs to, from the answers
+    /// to questions [`NetworkFilter::allows_name`] allowed, in lower case;
+    /// empty for an address the guest did not get from DNS (a literal).
+    pub names: &'a [String],
+}
+
+impl<'a> Destination<'a> {
+    /// A destination as the host describes it to the filter, for an
+    /// embedder testing its own.
+    pub fn new(addr: SocketAddr, udp: bool, names: &'a [String]) -> Self {
+        Self { addr, udp, names }
+    }
+}
+
+/// A [`NetworkFilter`] with what the host records for it: the names DNS
+/// gave each address, and the resolvers the guest may ask.
+///
+/// Clones share that record, so give each sandbox a `Filter` of its own;
+/// [`Filter::from_arc`] shares the embedder's rules between them.
+#[derive(Clone)]
+pub struct Filter {
+    filter: Arc<dyn NetworkFilter>,
+    learned: Arc<Mutex<HashMap<IpAddr, Vec<String>>>>,
+    resolvers: Resolvers,
+}
+
+impl Filter {
+    pub fn new(filter: impl NetworkFilter + 'static) -> Self {
+        Self::from_arc(Arc::new(filter))
+    }
+
+    /// A filter the embedder keeps a handle on, to change what it allows.
+    pub fn from_arc(filter: Arc<dyn NetworkFilter>) -> Self {
+        Self {
+            filter,
+            learned: Arc::default(),
+            resolvers: Resolvers::default(),
+        }
+    }
+
+    /// Also treat `ips` as DNS resolvers the guest may ask, as
+    /// [`AllowList::exempt_resolvers`] does.
+    pub fn exempt_resolvers(&self, ips: impl IntoIterator<Item = IpAddr>) {
+        self.resolvers.extend(ips);
+    }
+
+    fn allows(&self, addr: SocketAddr, udp: bool) -> bool {
+        if udp && addr.port() == 53 && self.resolvers.contains(&addr.ip()) {
+            return true;
+        }
+        // Copied out, so the embedder's filter runs with no lock held.
+        let names = self
+            .learned
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&addr.ip())
+            .cloned()
+            .unwrap_or_default();
+        ask(|| self.filter.allows(&Destination::new(addr, udp, &names)))
+    }
+
+    fn allows_name(&self, name: &str) -> bool {
+        ask(|| self.filter.allows_name(name))
+    }
+
+    fn learn(&self, name: &str, ips: Vec<IpAddr>) {
+        let mut learned = self.learned.lock().unwrap_or_else(|e| e.into_inner());
+        for ip in ips {
+            let ip = canonical(ip);
+            if !learned.contains_key(&ip) && learned.len() >= MAX_LEARNED_IPS {
+                continue;
+            }
+            let names = learned.entry(ip).or_default();
+            if names.len() < MAX_NAMES_PER_IP && !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+}
+
+/// The embedder's answer, a panic counting as a refusal: it unwinds
+/// through no host call, which would end the sandbox.
+fn ask(question: impl FnOnce() -> bool) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(question)).unwrap_or(false)
+}
+
+impl fmt::Debug for Filter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Not waiting: this may be formatted from inside a filter's answer.
+        let learned = self.learned.try_lock().map(|l| l.len()).ok();
+        f.debug_struct("Filter")
+            .field("learned_ips", &learned)
+            .field("resolvers", &self.resolvers)
+            .finish_non_exhaustive()
     }
 }
 
@@ -571,78 +775,78 @@ pub(crate) fn dns_question_names(data: &[u8]) -> Option<Vec<String>> {
 
 // ── DNS response IP learning ───────────────────────────────────────
 
-/// Extract IPs from a DNS response for hostnames that match the allow list.
-/// Minimal parser — handles standard A (type 1) and AAAA (type 28) answers.
-fn learn_ips_from_dns_response(data: &[u8], al: &AllowList) {
+/// The name a DNS response answers and the addresses it gives for it, or
+/// `None` if `data` is no response with answers.  Minimal parser: handles
+/// standard A (type 1) and AAAA (type 28) answers, and credits every one to
+/// the name asked, through any CNAME chain.
+fn dns_answer_ips(data: &[u8]) -> Option<(String, Vec<IpAddr>)> {
     if data.len() < 12 {
-        return;
+        return None;
     }
     let flags = u16::from_be_bytes([data[2], data[3]]);
     let is_response = (flags & 0x8000) != 0;
     if !is_response {
-        return;
+        return None;
     }
     let qdcount = u16::from_be_bytes([data[4], data[5]]) as usize;
     let ancount = u16::from_be_bytes([data[6], data[7]]) as usize;
     if qdcount == 0 || ancount == 0 {
-        return;
+        return None;
     }
 
     // Parse question section to extract the queried name.
     let mut pos = 12;
-    let qname = match dns_read_name(data, &mut pos) {
-        Some(n) => n,
-        None => return,
-    };
+    let qname = dns_read_name(data, &mut pos)?;
     // Skip QTYPE (2) + QCLASS (2)
     pos += 4;
     if pos > data.len() {
-        return;
+        return None;
     }
 
-    // Check if the queried name matches any allowed hostname.
-    let qname_lower = qname.to_lowercase();
-    let is_allowed_host = names_contain(&al.hostnames, &qname_lower);
-    if !is_allowed_host {
-        return;
-    }
-
-    // Parse answer records and learn IPs.
+    // Parse answer records; a malformed one ends the list.
+    let mut ips = Vec::new();
     for _ in 0..ancount {
-        if dns_read_name(data, &mut pos).is_none() {
-            return;
-        }
-        if pos + 10 > data.len() {
-            return;
+        if dns_read_name(data, &mut pos).is_none() || pos + 10 > data.len() {
+            break;
         }
         let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let rdlen = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
         pos += 10;
         if pos + rdlen > data.len() {
-            return;
+            break;
         }
         match rtype {
             1 if rdlen == 4 => {
-                let ip = IpAddr::V4(std::net::Ipv4Addr::new(
+                ips.push(IpAddr::V4(std::net::Ipv4Addr::new(
                     data[pos],
                     data[pos + 1],
                     data[pos + 2],
                     data[pos + 3],
-                ));
-                al.learn_ip(ip);
+                )));
             }
             28 if rdlen == 16 => {
                 let mut octets = [0u8; 16];
                 octets.copy_from_slice(&data[pos..pos + 16]);
-                al.learn_ip(IpAddr::V6(std::net::Ipv6Addr::from(octets)));
+                ips.push(IpAddr::V6(std::net::Ipv6Addr::from(octets)));
             }
             _ => {}
         }
         pos += rdlen;
     }
+    Some((qname, ips))
 }
 
+/// Longest name, in its dotted text form, that DNS carries (RFC 1035's
+/// 255 octets on the wire).
+const MAX_NAME_LEN: usize = 253;
+
 /// Read a DNS name at `pos`, advancing pos past it.
+///
+/// Only a name a resolver could be asked about reads: at most
+/// [`MAX_NAME_LEN`] characters, in labels of printable ASCII with no dot of
+/// their own, so two names on the wire never read as the same text (the
+/// label `a.b` as the two labels `a` and `b`), and a forged message cannot
+/// make a long one out of a compression loop.
 fn dns_read_name(data: &[u8], pos: &mut usize) -> Option<String> {
     let mut name = String::new();
     let mut p = *pos;
@@ -674,14 +878,26 @@ fn dns_read_name(data: &[u8], pos: &mut usize) -> Option<String> {
             p = offset;
             continue;
         }
+        // 0x40 and 0x80: extended and reserved label types, not a length.
+        if len & 0xC0 != 0 {
+            return None;
+        }
         p += 1;
         if p + len > data.len() {
+            return None;
+        }
+        let label = &data[p..p + len];
+        if !label.iter().all(|b| b.is_ascii_graphic() && *b != b'.') {
             return None;
         }
         if !name.is_empty() {
             name.push('.');
         }
-        name.push_str(&String::from_utf8_lossy(&data[p..p + len]));
+        if name.len() + len > MAX_NAME_LEN {
+            return None;
+        }
+        // Printable ASCII, checked above.
+        name.extend(label.iter().map(|&b| char::from(b)));
         p += len;
     }
     if jumped {
@@ -1053,5 +1269,249 @@ mod tests {
         let extra: IpAddr = "172.16.0.1".parse().unwrap();
         al.learn_ip(extra);
         assert!(!al.is_allowed(&extra));
+    }
+
+    /// A filter that allows `name` on `port`, and the literal `ip` on any
+    /// port; the names it is asked about are kept, to check what it saw.
+    struct NameAndPort {
+        name: String,
+        port: u16,
+        ip: Option<IpAddr>,
+        allowed: Mutex<bool>,
+    }
+
+    impl NetworkFilter for NameAndPort {
+        fn allows_name(&self, name: &str) -> bool {
+            *self.allowed.lock().unwrap() && name == self.name
+        }
+
+        fn allows(&self, d: &Destination<'_>) -> bool {
+            *self.allowed.lock().unwrap()
+                && (Some(d.addr.ip()) == self.ip
+                    || (d.addr.port() == self.port && d.names.contains(&self.name)))
+        }
+    }
+
+    fn name_and_port(name: &str, port: u16, ip: Option<&str>) -> Arc<NameAndPort> {
+        Arc::new(NameAndPort {
+            name: name.into(),
+            port,
+            ip: ip.map(|ip| ip.parse().unwrap()),
+            allowed: Mutex::new(true),
+        })
+    }
+
+    /// Questions are put to the filter by name, as DNS spells it in lower
+    /// case and without the trailing dot; a malformed one is refused.
+    #[test]
+    fn filter_judges_questions_by_name() {
+        let policy = NetworkPolicy::Filter(Filter::new(NameAndPort {
+            name: "api.example.com".into(),
+            port: 443,
+            ip: None,
+            allowed: Mutex::new(true),
+        }));
+        assert!(policy.allows_query(&dns_query(&["api.example.com"])));
+        assert!(policy.allows_query(&dns_query(&["API.Example.COM"])));
+        assert!(!policy.allows_query(&dns_query(&["example.com"])));
+        assert!(!policy.allows_query(&dns_query(&["api.example.com", "evil.example"])));
+        assert!(!policy.allows_query(b"not dns"));
+    }
+
+    /// An address is allowed by the names DNS gave it, on the filter's
+    /// terms, here one port; answers from a stranger and for names the
+    /// filter refuses teach nothing.
+    #[test]
+    fn filter_judges_addresses_by_the_names_dns_gave_them() {
+        let policy = NetworkPolicy::Filter(Filter::from_arc(name_and_port(
+            "api.example.com",
+            443,
+            None,
+        )));
+        let resolver: SocketAddr = "8.8.8.8:53".parse().unwrap();
+        let stranger: SocketAddr = "198.51.100.1:53".parse().unwrap();
+        let told: SocketAddr = "203.0.113.9:443".parse().unwrap();
+        let other: SocketAddr = "203.0.113.10:443".parse().unwrap();
+        assert!(!policy.allows(&told, false));
+        policy.learn_from_dns_answer(stranger, &dns_answer("api.example.com", told.ip()));
+        assert!(!policy.allows(&told, false));
+        policy.learn_from_dns_answer(resolver, &dns_answer("API.example.com", told.ip()));
+        assert!(policy.allows(&told, false));
+        // The filter's port, not any port.
+        assert!(!policy.allows(&SocketAddr::new(told.ip(), 80), false));
+        // A name the filter refuses is not credited with its addresses.
+        policy.learn_from_dns_answer(resolver, &dns_answer("evil.example", other.ip()));
+        assert!(!policy.allows(&other, false));
+        // IPv4-mapped IPv6 is the IPv4 address.
+        let mapped: SocketAddr = "[::ffff:203.0.113.9]:443".parse().unwrap();
+        assert!(policy.allows(&mapped, false));
+    }
+
+    /// What the filter allows is asked again at every connect, so a change
+    /// takes effect at once, without a new policy.
+    #[test]
+    fn filter_changes_take_effect_at_the_next_connect() {
+        let filter = name_and_port("api.example.com", 443, Some("192.0.2.7"));
+        let policy = NetworkPolicy::Filter(Filter::from_arc(filter.clone()));
+        let literal: SocketAddr = "192.0.2.7:5432".parse().unwrap();
+        assert!(policy.allows(&literal, false));
+        *filter.allowed.lock().unwrap() = false;
+        assert!(!policy.allows(&literal, false));
+        assert!(!policy.allows_query(&dns_query(&["api.example.com"])));
+    }
+
+    /// Loopback and the metadata addresses are refused whatever the filter
+    /// says; the exempt resolvers take questions on UDP only.
+    #[test]
+    fn filter_keeps_the_fixed_refusals_and_the_resolver_exemption() {
+        let filter = Filter::new(NameAndPort {
+            name: String::new(),
+            port: 0,
+            ip: None,
+            allowed: Mutex::new(true),
+        });
+        filter.exempt_resolvers(["192.0.2.53".parse().unwrap()]);
+        let policy = NetworkPolicy::Filter(filter);
+        struct All;
+        impl NetworkFilter for All {
+            fn allows_name(&self, _: &str) -> bool {
+                true
+            }
+            fn allows(&self, _: &Destination<'_>) -> bool {
+                true
+            }
+        }
+        let all = NetworkPolicy::Filter(Filter::new(All));
+        for addr in [
+            "127.0.0.1:80",
+            "[::1]:80",
+            "169.254.169.254:80",
+            "[fd00:ec2::254]:80",
+        ] {
+            assert!(!all.allows(&addr.parse().unwrap(), false), "{addr}");
+        }
+        for resolver in ["8.8.8.8:53", "192.0.2.53:53"] {
+            let resolver: SocketAddr = resolver.parse().unwrap();
+            assert!(policy.allows(&resolver, true));
+            assert!(!policy.allows(&resolver, false));
+        }
+    }
+
+    /// The names recorded for one address are capped.
+    #[test]
+    fn filter_caps_the_names_per_address() {
+        let filter = Filter::new(NameAndPort {
+            name: String::new(),
+            port: 0,
+            ip: None,
+            allowed: Mutex::new(true),
+        });
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        for i in 0..MAX_NAMES_PER_IP + 4 {
+            filter.learn(&format!("host{i}.example"), vec![ip]);
+        }
+        filter.learn("host0.example", vec![ip]);
+        assert_eq!(filter.learned.lock().unwrap()[&ip].len(), MAX_NAMES_PER_IP);
+    }
+
+    /// A filter that panics refuses, and one that formats the policy while
+    /// it answers does not wait on itself.
+    #[test]
+    fn filter_panics_refuse_and_formatting_inside_does_not_block() {
+        struct Panics;
+        impl NetworkFilter for Panics {
+            fn allows_name(&self, _: &str) -> bool {
+                panic!("filter bug")
+            }
+            fn allows(&self, _: &Destination<'_>) -> bool {
+                panic!("filter bug")
+            }
+        }
+        let policy = NetworkPolicy::Filter(Filter::new(Panics));
+        assert!(!policy.allows(&"203.0.113.9:443".parse().unwrap(), false));
+        assert!(!policy.allows_query(&dns_query(&["example.com"])));
+
+        struct Formats(std::sync::OnceLock<Filter>);
+        impl NetworkFilter for Formats {
+            fn allows_name(&self, _: &str) -> bool {
+                true
+            }
+            fn allows(&self, _: &Destination<'_>) -> bool {
+                format!("{:?}", self.0.get().unwrap()).contains("Filter")
+            }
+        }
+        let formats = Arc::new(Formats(std::sync::OnceLock::new()));
+        let filter = Filter::from_arc(formats.clone());
+        formats.0.set(filter.clone()).unwrap();
+        let policy = NetworkPolicy::Filter(filter);
+        policy.learn_from_dns_answer(
+            "8.8.8.8:53".parse().unwrap(),
+            &dns_answer("example.com", "203.0.113.9".parse().unwrap()),
+        );
+        assert!(policy.allows(&"203.0.113.9:443".parse().unwrap(), false));
+    }
+
+    /// The unspecified address reaches the host's loopback when connected
+    /// to, so whatever refuses loopback refuses it too.
+    #[test]
+    fn the_unspecified_address_is_refused_with_loopback() {
+        struct All;
+        impl NetworkFilter for All {
+            fn allows_name(&self, _: &str) -> bool {
+                true
+            }
+            fn allows(&self, _: &Destination<'_>) -> bool {
+                true
+            }
+        }
+        let policies = [
+            NetworkPolicy::AllowList(AllowList::from_hosts(&["0.0.0.0", "::"]).unwrap()),
+            NetworkPolicy::BlockList(BlockList::from_hosts(&["1.2.3.4"]).unwrap()),
+            NetworkPolicy::Filter(Filter::new(All)),
+        ];
+        for policy in &policies {
+            for addr in ["0.0.0.0:443", "[::]:443", "[::ffff:0.0.0.0]:443"] {
+                assert!(
+                    !policy.allows(&addr.parse().unwrap(), false),
+                    "{policy:?} {addr}"
+                );
+            }
+        }
+    }
+
+    /// A question whose name could not be asked of a resolver is refused:
+    /// a label with a dot in it, one with bytes that are not printable
+    /// ASCII, a name longer than DNS carries.
+    #[test]
+    fn names_no_resolver_could_be_asked_are_refused() {
+        let policy = NetworkPolicy::AllowList(AllowList::from_hosts(&["localhost"]).unwrap());
+        let raw = |labels: &[&[u8]]| {
+            let mut m = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+            for label in labels {
+                m.push(label.len() as u8);
+                m.extend_from_slice(label);
+            }
+            m.extend_from_slice(&[0, 0, 1, 0, 1]);
+            m
+        };
+        assert!(policy.allows_query(&raw(&[b"localhost"])));
+        // The one label "local.host" is not the name local.host.
+        assert!(dns_question_names(&raw(&[b"local.host"])).is_none());
+        assert!(dns_question_names(&raw(&[b"local\xffhost"])).is_none());
+        assert!(dns_question_names(&raw(&[b"local host"])).is_none());
+        let long = vec![b"a".repeat(63); 4];
+        let labels: Vec<&[u8]> = long.iter().map(Vec::as_slice).collect();
+        assert!(dns_question_names(&raw(&labels)).is_none());
+        let fits = [
+            b"a".repeat(63),
+            b"a".repeat(63),
+            b"a".repeat(63),
+            b"a".repeat(61),
+        ];
+        let labels: Vec<&[u8]> = fits.iter().map(Vec::as_slice).collect();
+        assert_eq!(
+            dns_question_names(&raw(&labels)).unwrap()[0].len(),
+            MAX_NAME_LEN
+        );
     }
 }

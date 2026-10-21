@@ -3,7 +3,9 @@
 mod common;
 
 use common::{UNUSED_PORT, host_ip, net_probe, require_rootfs};
-use hyperlight_unikraft::{AllowList, BlockList, NetworkPolicy, SandboxBuilder};
+use hyperlight_unikraft::{
+    AllowList, BlockList, Destination, Filter, NetworkFilter, NetworkPolicy, SandboxBuilder,
+};
 
 /// Networking disabled by default — guest socket calls fail because
 /// every socket() is refused with EACCES, as a policy refuses a destination.
@@ -228,6 +230,83 @@ fn net_policy_allowlist_by_name_end_to_end() {
     assert!(out.contains("listed 200"), "{out:?}");
     assert!(out.contains("unlisted refused"), "{out:?}");
     assert!(out.contains("literal refused"), "{out:?}");
+}
+
+/// A filter that allows one name on one port, while `on`.
+struct OneNameOnePort {
+    name: &'static str,
+    port: u16,
+    on: std::sync::atomic::AtomicBool,
+}
+
+impl NetworkFilter for OneNameOnePort {
+    fn allows_name(&self, name: &str) -> bool {
+        self.on.load(std::sync::atomic::Ordering::Relaxed) && name == self.name
+    }
+    fn allows(&self, d: &Destination<'_>) -> bool {
+        d.addr.port() == self.port && d.names.iter().any(|n| self.allows_name(n))
+    }
+}
+
+/// A guest under a filter reaches the name it allows on the port it
+/// allows, and nothing else: not that name on another port, not another
+/// name, not a literal address.  Turning the filter off applies at the
+/// next run, without booting again.  Needs the internet.
+#[test]
+fn net_policy_filter_end_to_end() {
+    let rootfs = require_rootfs("python");
+    let filter = std::sync::Arc::new(OneNameOnePort {
+        name: "example.com",
+        port: 80,
+        on: true.into(),
+    });
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .network(NetworkPolicy::Filter(Filter::from_arc(filter.clone())))
+        .boot()
+        .unwrap();
+    sandbox
+        .run(concat!(
+            "import errno, socket, urllib.request\n",
+            "print('allowed', urllib.request.urlopen('http://example.com', timeout=15).status)\n",
+            "def connect(host, port):\n",
+            "    s = socket.socket()\n",
+            "    s.settimeout(5)\n",
+            "    try:\n",
+            "        s.connect((host, port))\n",
+            "        return 'connected'\n",
+            "    except OSError as e:\n",
+            "        return 'refused' if e.errno == errno.EACCES else repr(e)\n",
+            "    finally:\n",
+            "        s.close()\n",
+            "print('other port', connect('example.com', 443))\n",
+            "print('literal', connect('1.1.1.1', 80))\n",
+            "try:\n",
+            "    socket.getaddrinfo('github.com', 80)\n",
+            "    print('other name resolved')\n",
+            "except OSError:\n",
+            "    print('other name refused')\n",
+        ))
+        .unwrap();
+    let out = sandbox.drain_output();
+    assert!(out.contains("allowed 200"), "{out:?}");
+    assert!(out.contains("other port refused"), "{out:?}");
+    assert!(out.contains("literal refused"), "{out:?}");
+    assert!(out.contains("other name refused"), "{out:?}");
+
+    filter.on.store(false, std::sync::atomic::Ordering::Relaxed);
+    sandbox
+        .run(concat!(
+            "import urllib.request\n",
+            "try:\n",
+            "    urllib.request.urlopen('http://example.com', timeout=15)\n",
+            "    print('still reached')\n",
+            "except OSError:\n",
+            "    print('now refused')\n",
+        ))
+        .unwrap();
+    let out = sandbox.drain_output();
+    assert!(out.contains("now refused"), "{out:?}");
 }
 
 /// A guest under a block list of one name cannot resolve it, cannot
