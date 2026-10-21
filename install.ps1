@@ -19,17 +19,11 @@ $version = $env:HLUK_VERSION
 $dir = if ($env:HLUK_INSTALL_DIR) { $env:HLUK_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'hluk\bin' }
 
 $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-if ($arch -ne 'X64') {
-    # No release yet boots guests on Windows arm64, so build main there;
-    # ring needs clang on that target.
-    $build = if ($arch -eq 'Arm64') {
-        "``git clone https://github.com/$repo``, then ``cargo install --locked --path .`` inside it, builds it from main, with Visual Studio's clang (its C++ Clang component, VC\Tools\Llvm\ARM64\bin) on the PATH"
-    } else {
-        "``cargo install hyperlight-unikraft`` builds it from source"
-    }
-    throw "no prebuilt hluk for Windows/${arch}: $build"
+$target = switch ($arch) {
+    'X64' { 'x86_64-pc-windows-msvc' }
+    'Arm64' { 'aarch64-pc-windows-msvc' }
+    default { throw "no prebuilt hluk for Windows/${arch}: ``cargo install hyperlight-unikraft`` builds it from source" }
 }
-$target = 'x86_64-pc-windows-msvc'
 
 if (-not $version) {
     $version = (Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/$repo/releases/latest").tag_name
@@ -47,7 +41,18 @@ try {
     # -UseBasicParsing: Windows PowerShell 5.1 otherwise needs Internet
     # Explorer's engine to parse the response.  -DisableKeepAlive: 5.1 may
     # reuse a connection the server has closed and fail the next request.
-    Invoke-WebRequest -UseBasicParsing -DisableKeepAlive "$base/$asset" -OutFile (Join-Path $tmp $asset)
+    try {
+        Invoke-WebRequest -UseBasicParsing -DisableKeepAlive "$base/$asset" -OutFile (Join-Path $tmp $asset)
+    } catch {
+        $resp = $_.Exception.Response
+        # Releases up to v0.18.0 have no Windows arm64 binary; a 404 for
+        # a later one, or a version never released, is the plain error.
+        $old = $version -match '^v(\d+\.\d+\.\d+)$' -and [version]$Matches[1] -le [version]'0.18.0'
+        if ($old -and $resp -and [int]$resp.StatusCode -eq 404 -and $arch -eq 'Arm64') {
+            throw "$version has no Windows arm64 hluk; a later release or `$env:HLUK_VERSION = 'dev' does"
+        }
+        throw
+    }
 
     # Verify against the release's checksum file when it has one.  Only its
     # absence (404) skips the check; any other failure stops the install.
