@@ -1,0 +1,17 @@
+<clickhouse>
+    <driver>
+        <!-- CREATE FUNCTION ... ENGINE = HyperlightPython AS '...' -->
+        <name>HyperlightPython</name>
+        <!-- Relative to this file -->
+        <create_command>hyperlight_python_create.sh</create_command>
+        <env>
+            <!-- The python rootfs the functions run in: hluk's python image, or one built with its python driver -->
+            <CLICKHOUSE_HYPERLIGHT_INITRD>/var/lib/clickhouse/hyperlight/python.cpio</CLICKHOUSE_HYPERLIGHT_INITRD>
+            <!-- Optional: guest memory in MiB (the image's default, 256 for python), guests per function,
+                 and seconds a block may take -->
+            <!-- <CLICKHOUSE_HYPERLIGHT_SCRATCH_MB>512</CLICKHOUSE_HYPERLIGHT_SCRATCH_MB> -->
+            <!-- <CLICKHOUSE_HYPERLIGHT_POOL_SIZE>16</CLICKHOUSE_HYPERLIGHT_POOL_SIZE> -->
+            <!-- <CLICKHOUSE_HYPERLIGHT_MAX_EXECUTION_TIME>10</CLICKHOUSE_HYPERLIGHT_MAX_EXECUTION_TIME> -->
+        </env>
+    </driver>
+</clickhouse>

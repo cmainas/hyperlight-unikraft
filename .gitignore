@@ -15,3 +15,4 @@ publish/
 /examples/wasmtime/hello/target
 /examples/wasmtime/calculator/target
 /examples/wasmtime/hello-p3/target
+/integrations/clickhouse/target
