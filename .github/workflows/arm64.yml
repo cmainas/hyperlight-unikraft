@@ -446,3 +446,93 @@ jobs:
         run: |
           set -o pipefail
           just conformance python 2>&1 | tee conformance-output.txt
+
+  # ci.yml's bench job, on each arm64 host, with its own history and
+  # ceilings ("<os>-arm64" in benchmarks/limits.json).
+  bench-arm64:
+    name: "bench (${{ matrix.os }}-arm64, ${{ matrix.runtime }})"
+    needs: rootfs-arm64
+    concurrency:
+      group: arm64-bench-${{ matrix.runtime }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      cancel-in-progress: true
+    # The 1ES pool's JobId label must be unique to each job.
+    runs-on: >-
+      ${{ matrix.pool && fromJSON(format('["self-hosted", "Windows", "ARM64", "{0}", "JobId=bench-arm64-{1}-{2}-{3}"]',
+      matrix.pool, matrix.runtime, github.run_id, github.run_attempt)) || matrix.runner }}
+    permissions:
+      contents: write   # push to gh-pages
+    timeout-minutes: ${{ github.event_name == 'schedule' && 240 || 60 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, macos, windows]
+        runtime: [python, python-shell, agent]
+        include:
+          - os: linux
+            runner: [self-hosted, Linux, arm64, kvm]
+          - os: macos
+            runner: [self-hosted, macos, arm64, hvf]
+          - os: windows
+            pool: 1ES.Pool=hl-windows-arm
+        # agent only on main, and on Linux only nightly (see the top of
+        # this file).
+        exclude:
+          - runtime: ${{ github.event_name == 'pull_request' && 'agent' || '' }}
+          - os: ${{ github.event_name != 'schedule' && 'linux' || '' }}
+            runtime: agent
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+        with:
+          python-version: '3.12'
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      - name: Run benchmarks
+        id: bench
+        shell: bash
+        run: just bench ${{ matrix.runtime }}
+
+      # ci.yml's check, in Python: the Windows arm64 runners have no jq.
+      - name: Check ceilings
+        shell: bash
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+          HOST: ${{ matrix.os }}-arm64
+        run: |
+          python - <<'EOF'
+          import json, os, sys
+          limits = json.load(open("benchmarks/limits.json"))
+          ceilings = limits.get(os.environ["RUNTIME"], {}).get(os.environ["HOST"], {})
+          over = [f"{r['name']}: {r['value']} {r['unit']} is over the ceiling of {ceilings[r['name']]} {r['unit']}"
+                  for r in json.load(open("bench-results.json"))
+                  if r["name"] in ceilings and r["value"] > ceilings[r["name"]]]
+          for line in over:
+              print("::error::" + line)
+          if over:
+              sys.exit(f"{len(over)} ceiling(s) exceeded")
+          print(f"all {len(ceilings)} ceilings met")
+          EOF
+
+      # Without the Macs' system credential helper, osxkeychain, which hangs
+      # this action's fetch of gh-pages (a token in the URL) until the job
+      # times out; the same fetch without it takes a second.
+      - name: Store benchmark results
+        if: ${{ !cancelled() && steps.bench.outcome == 'success' }}
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          name: ${{ matrix.runtime }} benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: bench-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          benchmark-data-dir-path: dev/bench/${{ matrix.os }}-arm64/${{ matrix.runtime }}
+          auto-push: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+          summary-always: true
+          fail-on-alert: false
+          alert-threshold: '200%'
+          comment-on-alert: false
