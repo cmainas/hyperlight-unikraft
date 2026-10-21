@@ -44,6 +44,9 @@ tracing = "0.1"
 # speaks POSIX sockets one syscall per host call, and rustix is the safe,
 # cross-platform (Linux, Windows, macOS) wrapper over exactly that API.
 cap-std = "4"
+# Setting a file's times beneath a `Dir` (`fs_set_times`), which cap-std
+# leaves to this companion crate.
+cap-fs-ext = "4"
 # Entropy for the guest's CSPRNG (GetRandomBytes); already in the tree
 # through hyperlight-host.
 getrandom = "0.4"

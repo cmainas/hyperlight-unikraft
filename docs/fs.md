@@ -71,7 +71,7 @@ Reads and writes are transferred in chunks: the host's preferred size (`GetHostF
 
 Paths travel to the host as UTF-8 strings: a name that is not UTF-8 fails with `EILSEQ`, and a host file whose name is not UTF-8 lists with U+FFFD in its place (and cannot be opened by that name). The path below the mount's root is at most 1,023 bytes; a longer one fails with `ENAMETOOLONG`.
 
-Two limits of the protocol as it stands.  A directory listing is one host call, so a directory whose names do not fit in it (about 3,000 entries) does not list: `readdir` fails with `EOVERFLOW` and the guest goes on (TODO: page `fs_list`).  `stat` carries the size and whether the entry is a file or a directory, nothing more: mode reads as `755` (`555` on a read-only file), timestamps as the epoch, and a symlink as the file it points at (TODO: carry the real mode, the times and an `lstat`).
+Limits of the protocol as it stands.  A directory listing is one host call, so a directory whose names do not fit in it (about 3,000 entries) does not list: `readdir` fails with `EOVERFLOW` and the guest goes on (TODO: page `fs_list`).  `stat` carries the size, the kind, the host's mode bits (on Windows `755`, or `555` for a read-only file) and the access, modification and status change times; a symlink reads as the file it points at (TODO: an `lstat`).
 
 ### Supported operations
 
@@ -88,7 +88,8 @@ Two limits of the protocol as it stands.  A directory listing is one host call, 
 | symlink   | `fs_symlink`    |                                  |
 | readlink  | `fs_readlink`   |                                  |
 | hard link | `fs_link`       | within the same mount            |
-| chmod     | `fs_chmod`      |                                  |
+| chmod     | `fs_chmod`      | never setuid/setgid; on Windows, the read-only flag |
+| utime     | `fs_set_times`  | not before 1970; on Windows, not a read-only file |
 
 ### Read-only mounts
 
@@ -96,7 +97,7 @@ Passing `:ro` sets `MNT_RDONLY` on the VFS mount.  The kernel rejects writes at 
 
 ### Backends
 
-A mount need not be a host directory.  `Mount::backend(backend, guest_path, readonly)` serves it with the embedder's `FsBackend`, which is handed each of the operations above as a method call (`stat`, `read`, `write`, `create_dir`, `remove`, `truncate`, `list`, `rename`, and `symlink`, `hard_link` and `chmod`, which by default refuse links and ignore modes) and decides it: an embedder that accounts for every byte the guest writes, keeps files somewhere other than a directory, or refuses some names, does it there, while the guest's programs, C extensions and child processes included, use the files as on any mount.
+A mount need not be a host directory.  `Mount::backend(backend, guest_path, readonly)` serves it with the embedder's `FsBackend`, which is handed each of the operations above as a method call (`stat`, `read`, `write`, `create_dir`, `remove`, `truncate`, `list`, `rename`, and `symlink`, `hard_link`, `chmod` and `set_times`, which by default refuse links and ignore modes and times) and decides it: an embedder that accounts for every byte the guest writes, keeps files somewhere other than a directory, or refuses some names, does it there, while the guest's programs, C extensions and child processes included, use the files as on any mount.
 
 ```rust
 use std::io;
@@ -119,7 +120,7 @@ An error reaches the guest as the errno of its `io::ErrorKind` (`QuotaExceeded` 
 
 - No handles: each read or write names its path and offset, at most 64 KiB at a time.
 - A directory is read by listing it once per entry and taking the next entry by its position, so `list` must return the same order while the directory is unchanged, and reading a large directory costs as many listings as it has entries.  A name that is empty, `.`, `..`, over 255 bytes, or has a `/` or NUL is left out.
-- `stat` gives the size, and the type and permission bits: a file or a directory (`FileStat::file`, `FileStat::dir`), the only nodes the kernel makes on a hostfs mount.  So there are no symbolic links on a backend mount for now, whatever `symlink` does.
+- `stat` gives the size, the type and permission bits, and the times (`FileStat::times`, else the epoch): a file or a directory (`FileStat::file`, `FileStat::dir`), the only nodes the kernel makes on a hostfs mount.  So there are no symbolic links on a backend mount for now, whatever `symlink` does.
 
 On a read-only mount the backend is asked only to read.  A backend runs while the guest is stopped in a host call, and the snapshot rules above hold for its mounts as for any.  A backend mount's `host_path` is empty.
 

@@ -20,7 +20,7 @@
 //!
 //! Mounts may be marked read-only. Write operations (`fs_write_bytes`,
 //! `fs_mkdir`, `fs_unlink`, `fs_truncate`, `fs_rename`, `fs_symlink`,
-//! `fs_link`, `fs_chmod`) return `-EROFS` on read-only mounts. Read
+//! `fs_link`, `fs_chmod`, `fs_set_times`) return `-EROFS` on read-only mounts. Read
 //! operations (`fs_stat`, `fs_read_bytes`, `fs_list`, `fs_readlink`)
 //! work regardless.
 //!
@@ -36,7 +36,9 @@
 
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cap_fs_ext::{DirExt, SystemTimeSpec};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use hyperlight_host::func::Registerable;
@@ -85,6 +87,11 @@ pub struct FileStat {
     /// Type and permission bits, as in `st_mode` ([`S_IFDIR`] or
     /// [`S_IFREG`], and `0o7777`).
     pub mode: u32,
+    /// Last access, modification and status change: the epoch unless set
+    /// ([`times`](Self::times)).
+    pub accessed: SystemTime,
+    pub modified: SystemTime,
+    pub changed: SystemTime,
 }
 
 impl FileStat {
@@ -93,6 +100,9 @@ impl FileStat {
         Self {
             size,
             mode: S_IFREG | (perm & 0o7777),
+            accessed: UNIX_EPOCH,
+            modified: UNIX_EPOCH,
+            changed: UNIX_EPOCH,
         }
     }
 
@@ -101,6 +111,19 @@ impl FileStat {
         Self {
             size: 0,
             mode: S_IFDIR | (perm & 0o7777),
+            accessed: UNIX_EPOCH,
+            modified: UNIX_EPOCH,
+            changed: UNIX_EPOCH,
+        }
+    }
+
+    /// The same, with these access, modification and status change times.
+    pub fn times(self, accessed: SystemTime, modified: SystemTime, changed: SystemTime) -> Self {
+        Self {
+            accessed,
+            modified,
+            changed,
+            ..self
         }
     }
 }
@@ -183,6 +206,16 @@ pub trait FsBackend: Send + Sync {
     fn chmod(&self, _path: &str, _mode: u32) -> io::Result<()> {
         Ok(())
     }
+    /// Set the access and modification times, those that are `Some`, at
+    /// or after the epoch.  Ignored by default.
+    fn set_times(
+        &self,
+        _path: &str,
+        _accessed: Option<SystemTime>,
+        _modified: Option<SystemTime>,
+    ) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A host directory, the backend of a mount made with [`Mount::rw`] or
@@ -197,9 +230,13 @@ impl FsBackend for DirBackend {
         } else {
             self.0.metadata(path)?
         };
+        let [accessed, modified, changed] = times(&m);
         Ok(FileStat {
             size: m.len(),
             mode: synth_mode(&m),
+            accessed,
+            modified,
+            changed,
         })
     }
 
@@ -302,15 +339,28 @@ impl FsBackend for DirBackend {
         {
             use cap_std::fs::PermissionsExt;
             self.0
-                .set_permissions(path, cap_std::fs::Permissions::from_mode(mode))
+                .set_permissions(beneath(path), cap_std::fs::Permissions::from_mode(mode))
         }
         #[cfg(windows)]
         {
             // On Windows only the readonly bit matters.
-            let mut perms = self.0.metadata(path)?.permissions();
+            let mut perms = self.0.metadata(beneath(path))?.permissions();
             perms.set_readonly(mode & 0o222 == 0);
-            self.0.set_permissions(path, perms)
+            self.0.set_permissions(beneath(path), perms)
         }
+    }
+
+    fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> io::Result<()> {
+        let spec = |t: Option<SystemTime>| {
+            t.map(|t| SystemTimeSpec::Absolute(cap_std::time::SystemTime::from_std(t)))
+        };
+        self.0
+            .set_times(beneath(path), spec(accessed), spec(modified))
     }
 }
 
@@ -400,6 +450,14 @@ impl FsBackend for Guarded<'_> {
     fn chmod(&self, path: &str, mode: u32) -> io::Result<()> {
         self.ask(|b| b.chmod(path, mode))
     }
+    fn set_times(
+        &self,
+        path: &str,
+        accessed: Option<SystemTime>,
+        modified: Option<SystemTime>,
+    ) -> io::Result<()> {
+        self.ask(|b| b.set_times(path, accessed, modified))
+    }
 }
 
 /// Register all `fs_*` host functions.
@@ -436,6 +494,7 @@ pub(crate) fn register(
     //   [12..16] u32  mode
     //   [16]     u8   is_dir
     //   [17]     u8   is_file
+    //   [18..54] atime, mtime, ctime: each i64 seconds since the epoch, u32 nanoseconds
     {
         let mounts = mounts.clone();
         let prof = profile.clone();
@@ -449,12 +508,18 @@ pub(crate) fn register(
                 };
                 Ok(match stat {
                     Ok(st) => {
-                        let mut buf = Vec::with_capacity(18);
+                        let mut buf = Vec::with_capacity(STAT_LEN);
                         buf.extend(0i32.to_le_bytes());
                         buf.extend(st.size.to_le_bytes());
                         buf.extend(st.mode.to_le_bytes());
                         buf.push((st.mode & S_IFMT == S_IFDIR) as u8);
                         buf.push((st.mode & S_IFMT == S_IFREG) as u8);
+                        for t in [st.accessed, st.modified, st.changed] {
+                            let (secs, nanos) = split_time(t);
+                            buf.extend(secs.to_le_bytes());
+                            buf.extend(nanos.to_le_bytes());
+                        }
+                        debug_assert_eq!(buf.len(), STAT_LEN);
                         buf
                     }
                     Err(e) => errno_vec(e),
@@ -724,6 +789,7 @@ pub(crate) fn register(
 
     // ── fs_chmod ────────────────────────────────────────────────
     {
+        let mounts = mounts.clone();
         let prof = profile.clone();
         target.register_host_function(
             "fs_chmod",
@@ -741,10 +807,110 @@ pub(crate) fn register(
         )?;
     }
 
+    // ── fs_set_times ────────────────────────────────────────────
+    //
+    // `which` says which times to set: bit 0 the access time, bit 1 the
+    // modification time, each from its seconds since the epoch and
+    // nanoseconds.  A time the guest asked to be now arrives resolved, by
+    // the guest's clock.
+    {
+        let mounts = mounts.clone();
+        let prof = profile.clone();
+        target.register_host_function(
+            "fs_set_times",
+            move |mount_idx: i32,
+                  path: String,
+                  which: i32,
+                  atime_secs: i64,
+                  atime_nanos: i32,
+                  mtime_secs: i64,
+                  mtime_nanos: i32|
+                  -> hyperlight_host::Result<i32> {
+                let _profile = prof.host("fs_set_times");
+                let backend = match mounts.writable(mount_idx) {
+                    Ok(b) => b,
+                    Err(code) => return Ok(-code),
+                };
+                let (Some(accessed), Some(modified)) = (
+                    time_arg(which & 1 != 0, atime_secs, atime_nanos),
+                    time_arg(which & 2 != 0, mtime_secs, mtime_nanos),
+                ) else {
+                    return Ok(-errno::EINVAL);
+                };
+                Ok(status(Ok(backend.set_times(&path, accessed, modified))))
+            },
+        )?;
+    }
+
     Ok(())
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+/// The length of a successful `fs_stat` reply.
+const STAT_LEN: usize = 18 + 3 * 12;
+
+/// A guest path as cap-std takes it: the empty path the mount root goes
+/// by is `.` to cap-std.
+fn beneath(path: &str) -> &str {
+    if path.is_empty() { "." } else { path }
+}
+
+/// The access, modification and status change times of `m`.  Windows
+/// keeps no status change time: the modification time stands in for it.
+fn times(m: &cap_std::fs::Metadata) -> [SystemTime; 3] {
+    let std = |t: io::Result<cap_std::time::SystemTime>| t.map_or(UNIX_EPOCH, |t| t.into_std());
+    let modified = std(m.modified());
+    #[cfg(unix)]
+    let changed = {
+        use cap_std::fs::MetadataExt;
+        // Seconds and nanoseconds as the host's stat has them: a time
+        // before the epoch is negative seconds and positive nanoseconds.
+        let (secs, nanos) = (m.ctime(), m.ctime_nsec() as u32);
+        if secs >= 0 {
+            UNIX_EPOCH.checked_add(Duration::new(secs as u64, nanos))
+        } else {
+            UNIX_EPOCH
+                .checked_sub(Duration::from_secs(secs.unsigned_abs()))
+                .and_then(|t| t.checked_add(Duration::from_nanos(nanos.into())))
+        }
+        .unwrap_or(modified)
+    };
+    #[cfg(not(unix))]
+    let changed = modified;
+    [std(m.accessed()), modified, changed]
+}
+
+/// `t` as the guest's timespec has it: seconds since the epoch, negative
+/// before it, and nanoseconds, never negative.
+fn split_time(t: SystemTime) -> (i64, u32) {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => (
+            i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+            d.subsec_nanos(),
+        ),
+        Err(e) => {
+            let d = e.duration();
+            let secs = i64::try_from(d.as_secs()).map_or(i64::MIN, |s| -s);
+            match d.subsec_nanos() {
+                0 => (secs, 0),
+                n => (secs.saturating_sub(1), 1_000_000_000 - n),
+            }
+        }
+    }
+}
+
+/// One time for `fs_set_times`: `None` for a time out of range, `Some(None)`
+/// for one not to set.  Not before the epoch: the crates that set it
+/// (`fs-set-times`, cap-primitives) panic on such a time.
+fn time_arg(set: bool, secs: i64, nanos: i32) -> Option<Option<SystemTime>> {
+    if !set {
+        return Some(None);
+    }
+    let nanos = u32::try_from(nanos).ok().filter(|n| *n < 1_000_000_000)?;
+    let secs = u64::try_from(secs).ok()?;
+    UNIX_EPOCH.checked_add(Duration::new(secs, nanos)).map(Some)
+}
 
 /// Synthesize a POSIX-ish mode from cap_std metadata.
 fn synth_mode(m: &cap_std::fs::Metadata) -> u32 {
@@ -755,6 +921,13 @@ fn synth_mode(m: &cap_std::fs::Metadata) -> u32 {
     } else {
         S_IFREG
     };
+    // The host's permission bits; on Windows, from the read-only flag.
+    #[cfg(unix)]
+    let perm = {
+        use cap_std::fs::PermissionsExt;
+        m.permissions().mode() & 0o7777
+    };
+    #[cfg(not(unix))]
     let perm = if m.permissions().readonly() {
         0o555u32
     } else {
