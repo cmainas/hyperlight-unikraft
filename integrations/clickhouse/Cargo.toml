@@ -1,0 +1,29 @@
+[package]
+name = "clickhouse-hyperlight"
+version = "0.1.0"
+edition = "2024"
+description = "ClickHouse user-defined functions in Python, each block run in a fresh Hyperlight micro-VM"
+license = "Apache-2.0"
+repository = "https://github.com/hyperlight-dev/hyperlight-unikraft"
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "clickhouse-hyperlight"
+path = "src/main.rs"
+
+[features]
+# The Microsoft Hypervisor (Azure Linux) as well as KVM, as for hluk
+mshv = ["hyperlight-unikraft/mshv"]
+
+[dependencies]
+# The library alone: the CLI's image pulls and project manifests are not needed to boot a rootfs
+hyperlight-unikraft = { path = "../..", default-features = false }
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: a Float64 result reads back as the very value Python printed
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.11"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

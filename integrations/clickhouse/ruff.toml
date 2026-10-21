@@ -1,0 +1,11 @@
+# For src/guest.py, the guest's half, as integrations/smolagents lints its Python
+line-length = 119
+# The python image's CPython
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[lint.isort]
+lines-after-imports = 2
