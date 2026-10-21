@@ -92,6 +92,8 @@ windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win
 
 [dev-dependencies]
 tempfile = "3"
+# To read the guest kernel's messages, Hyperlight's guest log, in tests.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 # The FlatBuffer decoder's external-value source, mirrored in the tests.
 anyhow = "1"
 bytes = "1"

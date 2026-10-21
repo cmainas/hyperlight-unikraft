@@ -1040,7 +1040,7 @@ pub fn run(args: RunArgs) -> CliResult<()> {
             if !sandbox.has_driver() {
                 return Err("warm_exec needs a runtime driver in the rootfs".into());
             }
-            sandbox.run(code.as_str())?;
+            crate::kernel_tail::workload(sandbox.run(code.as_str()))?;
             info!(elapsed_ms = elapsed_ms(t), "warm_exec done");
         }
         // Written beside its slot and moved in whole, so a run that dies

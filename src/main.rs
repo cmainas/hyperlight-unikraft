@@ -488,8 +488,20 @@ fn base_builder(kernel: Option<PathBuf>, initrd: Option<PathBuf>) -> CliResult<S
 /// written and never drains it, so keeps none: a long-running guest would
 /// grow the capture without end.
 fn boot(builder: SandboxBuilder) -> hyperlight_unikraft::Result<AppSandbox> {
-    builder.output_limit(0).boot()
+    // Always given: a restored guest would otherwise keep the level of
+    // whoever saved its snapshot.
+    let level = GUEST_LOG_LEVEL
+        .get()
+        .copied()
+        .unwrap_or(tracing::level_filters::LevelFilter::ERROR);
+    builder.guest_log_level(level).output_limit(0).boot()
 }
+
+/// The guest log level the logging asks for (`--log-level`, or the
+/// `RUST_LOG` that overrides it); unset, errors, which the kernel tail
+/// keeps.
+static GUEST_LOG_LEVEL: std::sync::OnceLock<tracing::level_filters::LevelFilter> =
+    std::sync::OnceLock::new();
 
 /// A function to call once the workload has run (`--call`, `--input`).
 struct Call {
@@ -530,7 +542,14 @@ fn drive(
                 .into(),
         );
     }
+    let plain_entry = no_workload && call.is_none() && !sandbox.has_driver();
     let result = drive_inner(sandbox, no_workload, exec, call, t);
+    // An entry point that wrote nothing at all (one that could not start,
+    // say) has only the kernel's messages to say what happened.
+    let output = sandbox.take_output();
+    if plain_entry && output.text.is_empty() && !output.truncated() {
+        kernel_tail::print();
+    }
     if sandbox.profile().enabled() {
         eprint!("{}", sandbox.profile().report());
     }
@@ -556,7 +575,7 @@ fn drive_inner(
             info!(elapsed_ms = elapsed_ms(t), "exec");
         }
         let t = Instant::now();
-        let result = sandbox.call(&call.function, &call.input)?;
+        let result = kernel_tail::workload(sandbox.call(&call.function, &call.input))?;
         info!(elapsed_ms = elapsed_ms(t), "call");
         if !result.is_empty() {
             println!("{result}");
@@ -577,7 +596,7 @@ fn drive_inner(
 /// Run the workload; a script too large for a call says how to run it.
 fn run_workload(sandbox: &mut AppSandbox, exec: Exec) -> CliResult<()> {
     let script = matches!(exec, Exec::File(_));
-    match sandbox.run(exec) {
+    match kernel_tail::workload(sandbox.run(exec)) {
         Err(e @ Error::CallTooLarge { .. }) if script => Err(format!(
             "{e}: mount the script's directory (--mount) and run it from the guest, with \
              --guest-exec or a short script that runs it"
@@ -628,7 +647,7 @@ fn cmd_snapshot_save(args: SaveArgs) -> CliResult<()> {
         if !sandbox.has_driver() {
             return Err("--warm-exec needs a runtime driver in the rootfs".into());
         }
-        sandbox.run(code.as_str())?;
+        kernel_tail::workload(sandbox.run(code.as_str()))?;
     }
 
     let t = Instant::now();
@@ -1027,6 +1046,10 @@ fn bench_parallel(args: BenchParallelArgs) -> CliResult<()> {
 
 fn main() {
     let Err(e) = cli_main() else { return };
+    // What the guest kernel said last may be why hluk failed: it stays out
+    // of the guest's output, so it has not been shown.  A workload's own
+    // failure has forgotten it already (kernel_tail::workload).
+    kernel_tail::print();
     // A script that failed has said why in the guest's output, and its
     // status is the command's, as when running it directly; a guest that
     // exited under a call is reported, with its status likewise.
@@ -1058,15 +1081,151 @@ fn main() {
     }
 }
 
+/// The guest kernel's latest messages, kept when no `--log-level` shows
+/// them as they come, for a hluk failure they may explain: they are
+/// Hyperlight's guest log, which it logs through `tracing` as target
+/// `hyperlight_guest`, apart from the guest's output.
+pub(crate) mod kernel_tail {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    const TARGET: &str = "hyperlight_guest";
+    /// Bytes of the latest lines kept; older ones are dropped.
+    const KEEP: usize = 16 * 1024;
+
+    struct Tail {
+        lines: VecDeque<String>,
+        bytes: usize,
+        /// Older lines dropped to keep `bytes` within `KEEP`.
+        dropped: usize,
+    }
+
+    impl Tail {
+        fn clear(&mut self) {
+            self.lines.clear();
+            self.bytes = 0;
+            self.dropped = 0;
+        }
+    }
+
+    static TAIL: Mutex<Tail> = Mutex::new(Tail {
+        lines: VecDeque::new(),
+        bytes: 0,
+        dropped: 0,
+    });
+
+    struct Keep;
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Keep {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>, _: Context<'_, S>) -> bool {
+            metadata.target() == TARGET
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let mut fields = Fields::default();
+            event.record(&mut fields);
+            let line = match fields.module.as_deref() {
+                Some(module) if !module.is_empty() => {
+                    format!("kernel: [{module}] {}", fields.message)
+                }
+                _ => format!("kernel: {}", fields.message),
+            };
+            let mut tail = TAIL.lock().unwrap();
+            tail.bytes += line.len();
+            tail.lines.push_back(line);
+            while tail.bytes > KEEP {
+                let Some(old) = tail.lines.pop_front() else {
+                    break;
+                };
+                tail.bytes -= old.len();
+                tail.dropped += 1;
+            }
+        }
+    }
+
+    /// A guest log event's message, and the library that printed it
+    /// (Hyperlight's `guest_module` field).
+    #[derive(Default)]
+    struct Fields {
+        message: String,
+        module: Option<String>,
+    }
+
+    impl tracing::field::Visit for Fields {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "guest_module" {
+                self.module = Some(value.to_string());
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            }
+        }
+    }
+
+    /// Without the `log` bridge `init()` would add, which would turn on
+    /// every dependency's `log` records for this layer to drop.
+    pub fn install() {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Keep));
+    }
+
+    /// Print the lines kept on stderr, and forget them.
+    pub fn print() {
+        let mut tail = TAIL.lock().unwrap();
+        if tail.dropped > 0 {
+            eprintln!(
+                "hluk: the kernel's last {} lines ({} before them left out):",
+                tail.lines.len(),
+                tail.dropped
+            );
+        }
+        for line in &tail.lines {
+            eprintln!("{line}");
+        }
+        tail.clear();
+    }
+
+    /// `result`, of the user's own code (a workload, a call, warm-up
+    /// code), forgetting the lines kept when it failed by its own doing: a
+    /// status of its own, an exit, or a call refused before it ran.  That
+    /// is no hluk failure, and a shell's "not found" says enough.
+    pub fn workload<T>(result: hyperlight_unikraft::Result<T>) -> hyperlight_unikraft::Result<T> {
+        use hyperlight_unikraft::Error;
+        if let Err(
+            Error::CallFailed { .. } | Error::GuestExited { .. } | Error::CallTooLarge { .. },
+        ) = &result
+        {
+            TAIL.lock().unwrap().clear();
+        }
+        result
+    }
+}
+
 fn cli_main() -> CliResult<()> {
     let cli = Cli::parse();
 
+    // Not for the benchmarks, whose guests run side by side: one buffer
+    // would mix their lines.
+    if cli.log_level.is_none() && !matches!(cli.command, Command::Bench(_)) {
+        kernel_tail::install();
+    }
     if let Some(level) = cli.log_level {
         // RUST_LOG overrides --log-level when set; otherwise scope to the
         // library and this binary, so dependency noise doesn't leak through.
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(format!("hyperlight_unikraft={level},hluk={level}"))
+            EnvFilter::new(format!(
+                "hyperlight_unikraft={level},hluk={level},hyperlight_guest={level}"
+            ))
         });
+        // And the guest kernel sends its messages to the most verbose
+        // level the filter shows.
+        let guest = filter
+            .max_level_hint()
+            .unwrap_or_else(|| tracing::level_filters::LevelFilter::from_level(level));
+        let _ = GUEST_LOG_LEVEL.set(guest);
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(false)

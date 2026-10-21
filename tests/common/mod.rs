@@ -15,6 +15,67 @@ use tempfile::TempDir;
 
 use hyperlight_unikraft::{Error, Exec, ListenPorts, NetworkPolicy, SandboxBuilder};
 
+/// Run `f`, and return what the guest kernel logged meanwhile, on this
+/// thread: each Hyperlight guest log message (target `hyperlight_guest`)
+/// as `[<library>] <message> (<file>:<line>)`.
+#[allow(dead_code)]
+pub fn guest_log<R>(f: impl FnOnce() -> R) -> (R, Vec<String>) {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    #[derive(Default)]
+    struct Fields {
+        message: String,
+        module: String,
+        file: String,
+        line: u64,
+    }
+
+    impl tracing::field::Visit for Fields {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            match field.name() {
+                "guest_module" => self.module = value.to_string(),
+                "guest_file" => self.file = value.to_string(),
+                _ => {}
+            }
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            if field.name() == "guest_line" {
+                self.line = value;
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            }
+        }
+    }
+
+    struct Keep(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Keep {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            if event.metadata().target() != "hyperlight_guest" {
+                return;
+            }
+            let mut f = Fields::default();
+            event.record(&mut f);
+            self.0.lock().unwrap().push(format!(
+                "[{}] {} ({}:{})",
+                f.module, f.message, f.file, f.line
+            ));
+        }
+    }
+
+    let lines = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(Keep(lines.clone()));
+    let result = tracing::subscriber::with_default(subscriber, f);
+    let lines = std::mem::take(&mut *lines.lock().unwrap());
+    (result, lines)
+}
+
 #[allow(dead_code)]
 pub fn rootfs(runtime: &str) -> Option<PathBuf> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

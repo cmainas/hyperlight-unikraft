@@ -2082,6 +2082,7 @@ fn assemble_sandbox(
     listen_ports: Option<ListenPorts>,
     host_functions: HostFunctionTable,
     host_write_err: bool,
+    guest_log_level: Option<tracing::level_filters::LevelFilter>,
     console: Console,
 ) -> Result<(UninitializedSandbox, GuestConfig)> {
     let scratch_size = scratch_mb * 1024 * 1024;
@@ -2090,6 +2091,9 @@ fn assemble_sandbox(
     cfg.set_scratch_size(scratch_size);
     cfg.set_heap_size(HEAP_SIZE);
     apply_transport(&mut cfg);
+    if let Some(level) = guest_log_level {
+        cfg.set_max_guest_log_level(level);
+    }
 
     // Permit the guest to touch the MSRs the Unikraft kernel programs
     apply_guest_msrs(&mut cfg)?;
@@ -2208,6 +2212,7 @@ pub struct SandboxBuilder {
     output_limit: usize,
     echo_output: bool,
     console_terminal: bool,
+    guest_log_level: Option<tracing::level_filters::LevelFilter>,
 }
 
 impl SandboxBuilder {
@@ -2230,6 +2235,7 @@ impl SandboxBuilder {
             output_limit: usize::MAX,
             echo_output: true,
             console_terminal: false,
+            guest_log_level: None,
         }
     }
 
@@ -2444,6 +2450,16 @@ impl SandboxBuilder {
         self
     }
 
+    /// The most verbose of the guest kernel's messages it sends to the
+    /// host's log: Hyperlight's guest log, which the host logs through
+    /// `tracing` as target `hyperlight_guest`, apart from the guest's
+    /// output.  Unset, a fresh guest takes Hyperlight's default (from
+    /// `RUST_LOG`, else errors), and a restored one keeps its snapshot's.
+    pub fn guest_log_level(mut self, level: tracing::level_filters::LevelFilter) -> Self {
+        self.guest_log_level = Some(level);
+        self
+    }
+
     /// Leave out the `HostWriteErr` host function, as an older or
     /// third-party host does: the guest's standard error then reaches
     /// `HostWrite`.  For testing that fallback, on a fresh boot: a snapshot
@@ -2478,6 +2494,7 @@ impl SandboxBuilder {
             output_limit,
             echo_output,
             console_terminal,
+            guest_log_level,
         } = self;
         // The empty name asks for the list of functions, one per line, so
         // neither it nor a line break can be in a function's name.
@@ -2514,6 +2531,7 @@ impl SandboxBuilder {
                     listen_ports,
                     host_functions,
                     host_write_err,
+                    guest_log_level,
                     Console::new(output_limit, echo_output, console_terminal),
                 )?;
                 if let Some(on) = profile {
@@ -2566,6 +2584,7 @@ impl SandboxBuilder {
                     listen_ports,
                     host_functions,
                     host_write_err,
+                    guest_log_level,
                     Console::new(output_limit, echo_output, console_terminal),
                 )?;
                 // Before the boot: the kernel fetches the environment once
@@ -2587,7 +2606,8 @@ impl SandboxBuilder {
                     Err(e) => {
                         // The guest's output is the diagnosis: all of it, a
                         // character cut short included, or under a limit its
-                        // beginning and how much is missing.
+                        // beginning and how much is missing.  The kernel's
+                        // own messages were logged as they came.
                         cfg.console.finish();
                         let output = cfg.take_output();
                         if !output.text.is_empty() || output.truncated() {
@@ -3154,6 +3174,7 @@ impl AppSandbox {
 /// [`Sandbox`] from the snapshot.  `mounts` are the restored
 /// guest's: the kernel reads them through `GetMounts` on its `resume`
 /// entry and makes its mount table match.
+#[allow(clippy::too_many_arguments)]
 fn restore_snapshot(
     snapshot: Arc<Snapshot>,
     mounts: Vec<Mount>,
@@ -3161,6 +3182,7 @@ fn restore_snapshot(
     listen_ports: Option<ListenPorts>,
     host_functions: HostFunctionTable,
     host_write_err: bool,
+    guest_log_level: Option<tracing::level_filters::LevelFilter>,
     console: Console,
 ) -> Result<(Sandbox, GuestConfig)> {
     let config = GuestConfig::new(
@@ -3188,6 +3210,9 @@ fn restore_snapshot(
     apply_transport(&mut sbcfg);
     sbcfg.set_heap_size(HEAP_SIZE);
     apply_guest_msrs(&mut sbcfg)?;
+    if let Some(level) = guest_log_level {
+        sbcfg.set_max_guest_log_level(level);
+    }
 
     let sandbox = Sandbox::from_snapshot(snapshot, hf, Some(sbcfg))?;
     Ok((sandbox, config))
