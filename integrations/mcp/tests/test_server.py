@@ -715,12 +715,27 @@ class TestArguments:
         assert args.package == ["sympy"]
         assert args.hluk_arg == ["--mount", "/d:/d:ro"]
 
+    def test_hosts_in_one_field(self):
+        # As the Desktop Extension passes them: one setting, empty when the user lists none
+        assert _parse_args(["--net-allow="]).net_allow == []
+        assert _parse_args(["--net-allow=a, b,,c", "--net-allow", "d"]).net_allow == ["a", "b", "c", "d"]
+
+    @pytest.mark.parametrize(("text", "seconds"), [("30", 30), ("30.0", 30), ("2.5", 2.5), ("1", 1)])
+    def test_decimal_timeout(self, text, seconds):
+        timeout = _parse_args(["--timeout", text]).timeout
+        assert timeout == seconds
+        assert type(timeout) is type(seconds)
+
     @pytest.mark.parametrize(
         "arguments",
         [
             ["--timeout", "0"],
             ["--timeout", "-1"],
             ["--timeout", "0.5"],
+            ["--timeout", "inf"],
+            ["--timeout", "nan"],
+            ["--timeout", "thirty"],
+            ["--startup-timeout", "inf"],
             ["--startup-timeout", "-5"],
             ["--startup-timeout", "0"],
             ["--startup-timeout", "nan"],

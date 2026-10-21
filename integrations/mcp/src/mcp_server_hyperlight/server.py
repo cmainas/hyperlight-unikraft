@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import functools
 import importlib.metadata
+import math
 import os
 import re
 import signal
@@ -289,7 +290,7 @@ class Sandbox:
 
 
 def _describe_run_python(
-    net_allow: list[str], timeout: int | None, image: str | None, packages: list[str], hluk_args: bool
+    net_allow: list[str], timeout: float | None, image: str | None, packages: list[str], hluk_args: bool
 ) -> str:
     lines = [
         "Run Python code in a sandbox: a local Hyperlight micro-VM, isolated from this machine by a hypervisor.",
@@ -324,7 +325,7 @@ def _describe_run_python(
     return "\n".join(lines)
 
 
-def _describe_reset(timeout: int | None, packages: list[str], net_allow: list[str]) -> str:
+def _describe_reset(timeout: float | None, packages: list[str], net_allow: list[str]) -> str:
     restore = "in milliseconds"
     if packages and net_allow:
         restore += f", then {', '.join(packages)} installed again"
@@ -408,12 +409,18 @@ def _number(kind: type[int] | type[float], minimum: float, what: str) -> Callabl
             value = kind(text)
         except ValueError:
             value = minimum - 1
-        # Not `value < minimum`, which a NaN passes
-        if not value >= minimum:
+        # Not `value < minimum`, which a NaN passes; nor infinity, which is no limit
+        if not minimum <= value < math.inf:
             raise argparse.ArgumentTypeError(f"not {what}: {text!r}")
-        return value
+        # 30, not 30.0, in what the tools' descriptions say
+        return int(value) if kind is float and value.is_integer() else value
 
     return parse
+
+
+def _hosts(text: str) -> list[str]:
+    """The hosts of one `--net-allow`: a list, for a client that has one field for them, where an empty one is none."""
+    return [host for host in re.split(r"[\s,]+", text) if host]
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -432,7 +439,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="guest memory in MiB (the image's)",
     )
     parser.add_argument(
-        "--net-allow", action="append", default=[], metavar="HOST", help="host or IP the guest may connect to (none)"
+        "--net-allow",
+        action="extend",
+        type=_hosts,
+        default=[],
+        metavar="HOST",
+        help="host or IP the guest may connect to, or several separated by commas (none)",
     )
     parser.add_argument(
         "--package",
@@ -445,7 +457,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--timeout",
         # Not 0 for no limit: the time limit is all that ends code that never does, which would hold the guest for
         # good, and every call after it
-        type=_number(int, 1, "a whole number of seconds above 0"),
+        type=_number(float, 1, "a number of seconds of at least 1"),
         default=MAX_EXECUTION_TIME_SECONDS,
         metavar="SECONDS",
         help=f"longest a call may run, and a reset wait for one ({MAX_EXECUTION_TIME_SECONDS})",

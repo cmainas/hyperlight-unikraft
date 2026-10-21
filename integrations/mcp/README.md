@@ -77,7 +77,7 @@ Pass them after the command, e.g. `uvx mcp-server-hyperlight --net-allow pypi.or
 
 | Option | Default | |
 |---|---|---|
-| `--net-allow HOST` | none | A host or IP the guest may connect to; repeat for more. With none, every connection is refused. |
+| `--net-allow HOST` | none | A host or IP the guest may connect to; repeat for more, or separate them with commas. With none, every connection is refused. |
 | `--package NAME` | none | A package to install in the guest at start and after each reset, if the image lacks it. Installing needs `--net-allow` for the package index. |
 | `--timeout SECONDS` | 30 | Longest a call may run, and so the longest a reset or the next call waits for one. |
 | `--runtime NAME` | `agent` | Published image to run, by name or full reference. |
