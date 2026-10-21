@@ -13,8 +13,16 @@ name: arm64
 # no security boundary, since a fork's pull request brings its own copy of
 # this file.  Outside code is kept off the runners by the setting that
 # requires approval before a fork's workflows run.
+#
+# Nightly, on main, it runs everything the Linux runner cannot in a
+# change's run: a small VM (2 CPUs, 3 GB) whose guests run under nested
+# virtualization, where a guest's first touch of each page is slow: the
+# agent, Java, node, .NET JIT and PowerShell suites take hours there (agent's
+# about 30 times as long as on the Mac).
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
   push:
     branches: [main]
   pull_request:
@@ -41,9 +49,10 @@ jobs:
         github.event.action != 'labeled' &&
         github.event.pull_request.head.repo.full_name == github.repository))
     # Per job, not per workflow: a run whose jobs are skipped (another label
-    # added) must not cancel one that is testing.
+    # added) must not cancel one that is testing.  The nightly run's groups
+    # are its own, so that a push to main cancels none of its jobs.
     concurrency:
-      group: arm64-rootfs-${{ github.event.pull_request.number || github.ref }}
+      group: arm64-rootfs-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
       cancel-in-progress: true
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
@@ -55,8 +64,9 @@ jobs:
       - name: Cache key
         id: key
         # "muslaot": the .NET AOT test programs moved to a musl toolchain,
-        # invalidating earlier entries.
-        run: echo "key=rootfs-arm64-muslaot-${{ hashFiles('rust-toolchain.toml', 'drivers/**', 'examples/agent/custom/Dockerfile', 'examples/c/**', 'examples/rust/**', 'examples/go/**', 'examples/wasmtime/**', 'examples/dotnet-aot/**') }}" >> "$GITHUB_OUTPUT"
+        # invalidating earlier entries.  The inputs are ci.yml's rootfs
+        # job's: the same images, conformance and demos included.
+        run: echo "key=rootfs-arm64-muslaot-${{ hashFiles('rust-toolchain.toml', 'drivers/**', 'conformance/python/**', 'examples/agent/custom/Dockerfile', 'examples/c/**', 'examples/rust/**', 'examples/go/**', 'examples/wasmtime/**', 'examples/dotnet-aot/**', 'examples/autonomous/**', 'examples/http-server/**', 'examples/agent-framework/local.Dockerfile', 'demos/pptx-gen/Dockerfile.rootfs') }}" >> "$GITHUB_OUTPUT"
 
       - name: Cache guest images and test binaries
         id: rootfs-cache
@@ -84,11 +94,13 @@ jobs:
           go-version: "1.24"
           cache: false
 
-      - name: Build rootfs images and test binaries
+      - name: Build rootfs images, conformance image and test binaries
         if: steps.rootfs-cache.outputs.cache-hit != 'true'
         run: |
           just build-all-rootfs
+          just build-conformance python
           just build-test-bins
+          just build-demos
 
       # For the test jobs: an artifact, since a macOS runner cannot restore
       # a cache entry Linux saved without zstd, which the self-hosted Macs
@@ -101,24 +113,54 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # The Linux release binary is a static musl build, which nothing else on
+  # arm64 boots a guest with: built here, booted by static-boot-arm64.
+  static-arm64:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'ci/arm64') &&
+       (github.event.action == 'labeled' && github.event.label.name == 'ci/arm64' ||
+        github.event.action != 'labeled' &&
+        github.event.pull_request.head.repo.full_name == github.repository))
+    concurrency:
+      group: arm64-static-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: musl toolchain
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+          rustup toolchain install
+          rustup target add aarch64-unknown-linux-musl
+
+      - name: Build hluk (static)
+        run: cargo build --release --locked --target aarch64-unknown-linux-musl
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hluk-static-arm64
+          path: target/aarch64-unknown-linux-musl/release/hluk
+          retention-days: 1
+          if-no-files-found: error
+
   test-arm64:
     name: test (${{ matrix.os }}-arm64)
     needs: rootfs-arm64
     concurrency:
-      group: arm64-test-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}
+      group: arm64-test-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
       cancel-in-progress: true
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ github.event_name == 'schedule' && 360 || 60 }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # The labels hyperlight's own arm64 jobs use (dep_build_test.yml).
-          # The Linux runner is a small VM (2 CPUs, 3 GB) whose guests run
-          # under nested virtualization: a large guest there takes 10-20
-          # minutes per test.  It runs the suites with small guests; macOS
-          # and Windows run everything, the agent, node, .NET JIT and
-          # PowerShell suites included.
+          # Linux runs the suites with small guests but nightly (see the
+          # top of this file); macOS and Windows run everything.
           - os: linux
             runner: [self-hosted, Linux, arm64, kvm]
             targets: >-
@@ -128,7 +170,6 @@ jobs:
               --test snapshot_mounts --test step --test wasmtime
           - os: macos
             runner: [self-hosted, macos, arm64, hvf]
-            targets: --all-targets
           # A 1ES pool, which wants a JobId label unique to each job, as in
           # hyperlight's dep_build_test.yml.  As many tests at a time as
           # `just test` runs on Windows.
@@ -139,40 +180,11 @@ jobs:
               - ARM64
               - 1ES.Pool=hl-windows-arm
               - JobId=test-arm64-windows-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
-            targets: --all-targets
             threads: 4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Self-hosted runners come without a Rust toolchain: install the one
-      # rust-toolchain.toml pins, as hyperlight's jobs do.
-      - name: Rust toolchain version
-        id: rust
-        shell: bash
-        run: echo "toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: ${{ steps.rust.outputs.toolchain }}
-
-      # ring compiles its C with clang, not cl.exe, on Windows arm64: use
-      # Visual Studio's, as hyperlight's jobs on these runners do (they
-      # find it through VSINSTALLDIR; vswhere needs no developer shell).
-      - name: Put Visual Studio's clang on the PATH
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath
-          if (-not $vs) { throw "no Visual Studio with its clang component" }
-          $llvm = Join-Path $vs 'VC\Tools\Llvm\ARM64\bin'
-          if (-not (Test-Path (Join-Path $llvm 'clang.exe'))) { throw "no clang.exe in '$llvm'" }
-          $llvm >> $env:GITHUB_PATH
-
-      - name: Fetch guest images and test binaries
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: rootfs-arm64
-          path: build-elfloader
+      - uses: ./.github/actions/arm64-host
 
       # On macOS, cargo signs each test binary with the hypervisor
       # entitlement first and runs its tests one at a time
@@ -181,8 +193,256 @@ jobs:
       # surrogate processes, spawned when needed, as `just test` sets up;
       # the other hosts ignore those variables.
       - name: cargo test
-        run: cargo test --locked ${{ matrix.targets }}
+        run: cargo test --locked ${{ github.event_name != 'schedule' && matrix.targets || '--all-targets' }}
         env:
           RUST_TEST_THREADS: ${{ matrix.threads || 1 }}
           HYPERLIGHT_MAX_SURROGATES: 8
           HYPERLIGHT_INITIAL_SURROGATES: 0
+
+  # The static hluk static-arm64 built, booting a guest on the KVM runner.
+  static-boot-arm64:
+    name: static (linux-arm64)
+    needs: [rootfs-arm64, static-arm64]
+    concurrency:
+      group: arm64-static-boot-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      cancel-in-progress: true
+    runs-on: [self-hosted, Linux, arm64, kvm]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch guest images
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rootfs-arm64
+          path: build-elfloader
+
+      - name: Fetch the static hluk
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hluk-static-arm64
+          path: static
+
+      - name: Boot a guest
+        run: |
+          chmod +x static/hluk
+          file static/hluk | grep -Eq 'static(ally|-pie) linked' || { file static/hluk; exit 1; }
+          static/hluk run --initrd build-elfloader/python-rootfs.cpio examples/python/hello.py
+
+  # ci.yml's demos, on each arm64 host: one job per host rather than per
+  # demo, as these runners are few.  Every demo runs; the job fails after
+  # them if any did.
+  demos-arm64:
+    name: demos (${{ matrix.os }}-arm64)
+    needs: rootfs-arm64
+    concurrency:
+      group: arm64-demos-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      cancel-in-progress: true
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: [self-hosted, Linux, arm64, kvm]
+          - os: macos
+            runner: [self-hosted, macos, arm64, hvf]
+          - os: windows
+            runner:
+              - self-hosted
+              - Windows
+              - ARM64
+              - 1ES.Pool=hl-windows-arm
+              - JobId=demos-arm64-windows-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+        with:
+          python-version: "3.12"
+
+      - name: Build hluk
+        run: cargo build --release --locked
+
+      # Hypervisor.framework serves only a binary with its entitlement.
+      - name: Sign hluk
+        if: runner.os == 'macOS'
+        run: codesign -f -s - --entitlements dev/macos-entitlements.plist target/release/hluk
+
+      # ci/run_demo.py, as `just demos` runs it on each host.
+      - name: Run the demos
+        shell: bash
+        run: |
+          failed=
+          for demo in supply-chain autonomous http-flask http-express http-kestrel pptx agent-fw-local; do
+            echo "::group::$demo"
+            python ci/run_demo.py "$demo" || failed="$failed $demo"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::Demos failed:$failed"
+            exit 1
+          fi
+
+  # ci.yml's integrations job, on each arm64 host.
+  integrations-arm64:
+    name: ${{ matrix.package }} (${{ matrix.os }}-arm64, ${{ matrix.deps }} ${{ matrix.package }}, Python ${{ matrix.python }})
+    needs: rootfs-arm64
+    concurrency:
+      group: arm64-${{ matrix.package }}-${{ matrix.deps }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      cancel-in-progress: true
+    # The 1ES pool's JobId label must be unique to each job.
+    runs-on: >-
+      ${{ matrix.pool && fromJSON(format('["self-hosted", "Windows", "ARM64", "{0}", "JobId=integrations-arm64-{1}-{2}-{3}-{4}"]',
+      matrix.pool, matrix.package, matrix.deps, github.run_id, github.run_attempt)) || matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [smolagents, mcp]
+        os: [linux, macos, windows]
+        deps: [oldest, newest]
+        include:
+          - os: linux
+            runner: [self-hosted, Linux, arm64, kvm]
+          - os: macos
+            runner: [self-hosted, macos, arm64, hvf]
+          - os: windows
+            pool: 1ES.Pool=hl-windows-arm
+          - package: smolagents
+            floors: smolagents
+          - package: mcp
+            floors: mcp smolagents-hyperlight smolagents anyio pydantic rich
+          - package: mcp
+            deps: newest
+            requires: -e ../smolagents
+          - deps: oldest
+            python: "3.10"
+          - deps: newest
+            python: "3.12"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Build hluk
+        run: cargo build --release --locked
+
+      # Hypervisor.framework serves only a binary with its entitlement.
+      - name: Sign hluk
+        if: runner.os == 'macOS'
+        run: codesign -f -s - --entitlements dev/macos-entitlements.plist target/release/hluk
+
+      - name: Install the package
+        working-directory: integrations/${{ matrix.package }}
+        env:
+          FLOORS: ${{ matrix.floors }}
+        run: |
+          python -m pip install ${{ matrix.requires }} -e '.[test]'
+          if [ "${{ matrix.deps }}" = oldest ]; then
+            pins=
+            for library in $FLOORS; do
+              oldest=$(sed -n "s/.*\"$library>=\([0-9.]*\),.*/\1/p" pyproject.toml)
+              if [ -z "$oldest" ]; then
+                echo "::error::pyproject.toml gives $library no floor"
+                exit 1
+              fi
+              pins="$pins $library==$oldest"
+            done
+            python -m pip install $pins
+          fi
+          for library in $FLOORS; do
+            echo "$library $(python -m pip show "$library" | sed -n 's/^Version: //p')"
+          done
+
+      - name: Test
+        working-directory: integrations/${{ matrix.package }}
+        env:
+          RUN_ALL: "1"
+          HLUK_PATH: ${{ github.workspace }}/target/release/hluk${{ runner.os == 'Windows' && '.exe' || '' }}
+          HLUK_INITRD: ${{ github.workspace }}/build-elfloader/agent-rootfs.cpio
+          HLUK_SCRATCH_MB: "1536"
+        run: python -m pytest -v
+
+  # ci.yml's clickhouse job on Linux arm64, with ClickHouse's arm64 build.
+  clickhouse-arm64:
+    name: clickhouse (linux-arm64)
+    needs: rootfs-arm64
+    concurrency:
+      group: arm64-clickhouse-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      cancel-in-progress: true
+    runs-on: [self-hosted, Linux, arm64, kvm]
+    timeout-minutes: 45
+    env:
+      CLICKHOUSE_VERSION: 26.9.22.3
+      CLICKHOUSE_SHA512: baa0ef9cab6ebeb5adbceca05dfaa449ed4ae4757a3320fbe2c0466174ce01c9137cc8d0e7a88f8c8711045f885d9d8dbd5a1794db26dff85c8eb1ecdc88995a
+    defaults:
+      run:
+        working-directory: integrations/clickhouse
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+
+      - name: Download ClickHouse
+        run: |
+          tarball="clickhouse-common-static-$CLICKHOUSE_VERSION-arm64.tgz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/ClickHouse/ClickHouse/releases/download/v$CLICKHOUSE_VERSION-stable/$tarball"
+          echo "$CLICKHOUSE_SHA512  $RUNNER_TEMP/$tarball" | sha512sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP"
+          echo "CLICKHOUSE_BINARY=$RUNNER_TEMP/clickhouse-common-static-$CLICKHOUSE_VERSION/usr/bin/clickhouse" >> "$GITHUB_ENV"
+
+      - name: Test
+        env:
+          CLICKHOUSE_HYPERLIGHT_INITRD: ${{ github.workspace }}/build-elfloader/python-rootfs.cpio
+        run: cargo test --release
+
+  # ci.yml's conformance job, on each arm64 host.
+  conformance-arm64:
+    name: conformance (${{ matrix.os }}-arm64)
+    needs: rootfs-arm64
+    concurrency:
+      group: arm64-conformance-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      cancel-in-progress: true
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: [self-hosted, Linux, arm64, kvm]
+          - os: macos
+            runner: [self-hosted, macos, arm64, hvf]
+          - os: windows
+            runner:
+              - self-hosted
+              - Windows
+              - ARM64
+              - 1ES.Pool=hl-windows-arm
+              - JobId=conformance-arm64-windows-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
+            # The pool's outbound NAT gives an FTP data connection another
+            # address than its control connection, which www.pythontest.net
+            # refuses (425 Bad IP connecting), from the host as from a guest.
+            skip: test_urllib2net
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      - name: Run CPython conformance suite
+        shell: bash
+        env:
+          CONFORMANCE_SKIP: ${{ matrix.skip }}
+        run: |
+          set -o pipefail
+          just conformance python 2>&1 | tee conformance-output.txt

@@ -1,0 +1,63 @@
+name: arm64 host
+description: >-
+  Ready a self-hosted arm64 runner for arm64.yml's jobs: the pinned Rust
+  toolchain, Visual Studio's clang on Windows, and the guest images and test
+  binaries the rootfs-arm64 job built; and Python, when asked for.
+
+inputs:
+  python-version:
+    description: A Python to put on the PATH, in a virtual environment with pip
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Self-hosted runners come without a Rust toolchain: install the one
+    # rust-toolchain.toml pins, as hyperlight's jobs do.
+    - name: Rust toolchain version
+      id: rust
+      shell: bash
+      run: echo "toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
+    - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      with:
+        toolchain: ${{ steps.rust.outputs.toolchain }}
+
+    # ring compiles its C with clang, not cl.exe, on Windows arm64: use
+    # Visual Studio's, as hyperlight's jobs on these runners do (they find
+    # it through VSINSTALLDIR; vswhere needs no developer shell).  The
+    # pool's newer image has Build Tools without that component and a
+    # standalone LLVM instead.
+    - name: Put clang on the PATH
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Llvm.Clang -property installationPath
+        $llvm = if ($vs) { Join-Path $vs 'VC\Tools\Llvm\ARM64\bin' } else { Join-Path $env:ProgramFiles 'LLVM\bin' }
+        if (-not (Test-Path (Join-Path $llvm 'clang.exe'))) { throw "no clang.exe in '$llvm'" }
+        $llvm >> $env:GITHUB_PATH
+
+    - name: Fetch guest images and test binaries
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: rootfs-arm64
+        path: build-elfloader
+
+    # Not setup-python, which installs Python with sudo on macOS, which the
+    # self-hosted Mac does not allow.
+    - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      if: inputs.python-version != ''
+
+    - name: Python ${{ inputs.python-version }}
+      if: inputs.python-version != ''
+      shell: bash
+      env:
+        PYTHON_VERSION: ${{ inputs.python-version }}
+      run: |
+        uv venv --seed --python "$PYTHON_VERSION" "$RUNNER_TEMP/venv"
+        if [ "$RUNNER_OS" = Windows ]; then
+          echo "$RUNNER_TEMP/venv/Scripts" >> "$GITHUB_PATH"
+        else
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+        fi
