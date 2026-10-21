@@ -549,7 +549,7 @@ fn drive_inner(
 ) -> CliResult<i32> {
     if let Some(call) = call {
         if !no_workload {
-            sandbox.run(exec)?;
+            run_workload(sandbox, exec)?;
             info!(elapsed_ms = elapsed_ms(t), "exec");
         }
         let t = Instant::now();
@@ -566,9 +566,22 @@ fn drive_inner(
         info!(elapsed_ms = elapsed_ms(t), status, "exec");
         return Ok(status);
     }
-    sandbox.run(exec)?;
+    run_workload(sandbox, exec)?;
     info!(elapsed_ms = elapsed_ms(t), "exec");
     Ok(0)
+}
+
+/// Run the workload; a script too large for a call says how to run it.
+fn run_workload(sandbox: &mut AppSandbox, exec: Exec) -> CliResult<()> {
+    let script = matches!(exec, Exec::File(_));
+    match sandbox.run(exec) {
+        Err(e @ Error::CallTooLarge { .. }) if script => Err(format!(
+            "{e}: mount the script's directory (--mount) and run it from the guest, with \
+             --guest-exec or a short script that runs it"
+        )
+        .into()),
+        result => Ok(result?),
+    }
 }
 
 fn cmd_snapshot_save(args: SaveArgs) -> CliResult<()> {

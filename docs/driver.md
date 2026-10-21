@@ -30,7 +30,7 @@ sequenceDiagram
     D->>K: open(/dev/hlcall)
     K-->>H: DriverReady
     D->>K: ioctl(MAXLEN)
-    K-->>D: 73,716 bytes
+    K-->>D: 1,048,564 bytes
     Note over D: Py_Initialize()
     D->>K: read()
     Note over D: parked, nothing left to run

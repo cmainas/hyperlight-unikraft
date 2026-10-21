@@ -93,6 +93,10 @@ pub enum Error {
          instead of join)"
     )]
     NothingToJoin,
+    /// A call too large for the transport: a script, inline code, a guest
+    /// command or a call's input of `bytes` bytes, past [`CALL_PAYLOAD_MAX`].
+    #[error("a call of {bytes} bytes is past the {CALL_PAYLOAD_MAX} a guest function call carries")]
+    CallTooLarge { bytes: usize },
     /// The kernel refused the call: nothing is reading `/dev/hlcall`.
     #[error("the guest refused the call: nothing is reading /dev/hlcall")]
     CallRejected,
@@ -426,12 +430,32 @@ const G2H_POOL_PAGES: usize = 2 * G2H_HALF_PAGES;
 /// than cut it short.
 pub(crate) const HOST_CALL_MAX: usize = G2H_HALF_PAGES * PAGE_SIZE - MSG_OVERHEAD;
 
-/// Pages of the host-to-guest pool, cut into receive buffers of
-/// Hyperlight's default size.  A guest function call can be as large as
-/// a host call's whole message (the kernel sizes `/dev/hlcall` buffers,
-/// which also take host call replies, from it), so it gets as many pages
-/// as a G2H half.
-const H2G_POOL_PAGES: usize = G2H_HALF_PAGES;
+/// The largest guest function call, in bytes: a script, inline code or a
+/// call's input.  The kernel sizes its call buffers from the host-to-guest
+/// pool, so this is the host's alone to set.  1 MiB: past what a script
+/// usually is.  The pool and each buffer sized from it (the kernel's two
+/// copies of a call; a driver's call, result and reply buffers) take that
+/// much of the guest's memory, about 6 MiB, though pages only a call that
+/// large touches cost a snapshot and a restore nothing.
+pub const GUEST_CALL_MAX: usize =
+    H2G_BUFFERS * H2G_BUFFER_SIZE - hyperlight_common::transport::MsgHeader::SIZE;
+
+/// Receive buffers posted on the host-to-guest queue, one per descriptor of
+/// Hyperlight's default queue: the guest posts no more than the queue holds.
+const H2G_BUFFERS: usize = SandboxConfiguration::DEFAULT_H2G_QUEUE_SIZE;
+
+/// Each host-to-guest receive buffer, sized for [`H2G_BUFFERS`] to carry
+/// 1 MiB and its message header.
+const H2G_BUFFER_SIZE: usize = 32 * 1024;
+
+const H2G_POOL_PAGES: usize = H2G_BUFFERS * H2G_BUFFER_SIZE / PAGE_SIZE;
+
+/// The most a guest function call's strings may hold together (a script
+/// and its environment version, say): [`GUEST_CALL_MAX`] less a 4 KiB
+/// reserve for the FlatBuffer framing, as a host call keeps
+/// ([`MSG_OVERHEAD`]).  A larger call is refused before it is sent
+/// ([`Error::CallTooLarge`]).
+pub const CALL_PAYLOAD_MAX: usize = GUEST_CALL_MAX - 4096;
 
 // Hyperlight keeps one H2G buffer spare for a call with byte parameters;
 // hluk's guest functions (`step`, `Exec`, `Call`, ...) take strings and
@@ -439,20 +463,21 @@ const H2G_POOL_PAGES: usize = G2H_HALF_PAGES;
 // call's.
 const _: () = {
     assert!(HOST_CALL_MAX >= 64 * 1024);
-    // The guest posts min(queue size, pool / buffer size) receive
-    // buffers: the default queue must post all of them, or a call the
-    // size of a G2H half would not fit.
-    let buffers = H2G_POOL_PAGES * PAGE_SIZE / SandboxConfiguration::DEFAULT_H2G_BUFFER_SIZE;
-    assert!(buffers <= SandboxConfiguration::DEFAULT_H2G_QUEUE_SIZE);
-    assert!(buffers * SandboxConfiguration::DEFAULT_H2G_BUFFER_SIZE >= G2H_HALF_PAGES * PAGE_SIZE);
+    // A guest function call can be as large as a host call's whole
+    // message (the kernel sizes `/dev/hlcall` buffers, which also take
+    // host call replies, from the larger of the two).
+    assert!(GUEST_CALL_MAX >= HOST_CALL_MAX);
+    assert!(H2G_BUFFER_SIZE.is_multiple_of(PAGE_SIZE));
 };
 
-/// Size the virtqueue pools for [`HOST_CALL_MAX`] transfers.  The other
-/// knobs keep Hyperlight's defaults: this guest copies every message out
-/// of the pools, so buffer sizes and queue depths change nothing it
-/// measures (see the transport notes in `docs/`).
+/// Size the virtqueue pools for [`HOST_CALL_MAX`] and [`GUEST_CALL_MAX`]
+/// transfers.  The queue depths keep Hyperlight's defaults: this guest
+/// copies every message out of the pools, so buffer sizes and queue
+/// depths change nothing it measures, past how large a guest function
+/// call can be (see the transport notes in `docs/`).
 fn apply_transport(cfg: &mut SandboxConfiguration) {
     cfg.set_g2h_pool_pages(G2H_POOL_PAGES);
+    cfg.set_h2g_buffer_size(H2G_BUFFER_SIZE);
     cfg.set_h2g_pool_pages(H2G_POOL_PAGES);
 }
 
@@ -2851,22 +2876,37 @@ impl AppSandbox {
         // Trailing on every call: the kernel answers the driver's
         // environment refresh from its copy while this matches.
         let env = self.config.env_version();
+        // Refused here, whole and with the reason, rather than by the transport
+        let fits = |bytes: usize| {
+            if bytes > CALL_PAYLOAD_MAX {
+                Err(Error::CallTooLarge { bytes })
+            } else {
+                Ok(())
+            }
+        };
         let yielded = match exec.into() {
-            Exec::Code(code) => self.config.enter(&mut self.sandbox, "Exec", (code, env))?,
+            Exec::Code(code) => {
+                fits(code.len())?;
+                self.config.enter(&mut self.sandbox, "Exec", (code, env))?
+            }
             Exec::File(path) => {
                 let code = std::fs::read_to_string(&path).map_err(|source| Error::Script {
                     path: path.clone(),
                     source,
                 })?;
+                fits(code.len())?;
                 self.config.enter(&mut self.sandbox, "Exec", (code, env))?
             }
             // Dispatched under its own name so the driver runs the named
             // guest file (empty command → its conventional entrypoint)
             // rather than treating the payload as inline code.
-            Exec::Guest(cmd) => self
-                .config
-                .enter(&mut self.sandbox, "GuestExec", (cmd, env))?,
+            Exec::Guest(cmd) => {
+                fits(cmd.len())?;
+                self.config
+                    .enter(&mut self.sandbox, "GuestExec", (cmd, env))?
+            }
             Exec::Call { function, input } => {
+                fits(function.len() + input.len())?;
                 self.config
                     .enter(&mut self.sandbox, "Call", (function, input, env))?
             }

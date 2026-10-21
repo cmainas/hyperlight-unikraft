@@ -162,9 +162,9 @@ A guest function call is a `Call(function, input)` that the kernel queues on `/d
 
 ### Transport
 
-The kernel and the host talk over Hyperlight's two virtqueues (VIRTIO packed rings in scratch memory). A host function call is one chain on the guest-to-host queue: the request, then a buffer for the reply. A guest function call arrives in 4 KiB buffers the kernel keeps posted on the host-to-guest queue, and its result goes back on the guest-to-host one. The kernel copies every message out of the pools, so it never holds a pool buffer past the call that used it.
+The kernel and the host talk over Hyperlight's two virtqueues (VIRTIO packed rings in scratch memory). A host function call is one chain on the guest-to-host queue: the request, then a buffer for the reply. A guest function call arrives in 32 KiB buffers the kernel keeps posted on the host-to-guest queue, and its result goes back on the guest-to-host one. The kernel copies every message out of the pools, so it never holds a pool buffer past the call that used it.
 
-Hyperlight leaves the sizes to the host. hluk sets only the pool sizes (`apply_transport` in `src/lib.rs`): each half of the guest-to-host pool, request and reply, holds a 64 KiB payload plus framing, and the host-to-guest pool as much. Buffer sizes and queue depths keep Hyperlight's defaults. Measured on KVM with Python:
+Hyperlight leaves the sizes to the host. hluk sets them in `apply_transport` in `src/lib.rs`: each half of the guest-to-host pool, request and reply, holds a 64 KiB payload plus framing (`HOST_CALL_MAX`), and the host-to-guest pool 32 buffers of 32 KiB, so a guest function call carries up to 1 MiB (`CALL_PAYLOAD_MAX` of its strings, a script say). A larger call fails with `Error::CallTooLarge` before it is sent. Queue depths keep Hyperlight's defaults. Measured on KVM with Python:
 
 | Knob | Effect |
 |---|---|
