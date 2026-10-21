@@ -1623,8 +1623,11 @@ class TestHyperlightExecutorIntegration(HyperlightGuestTests):
                     subprocess.run([sys.executable, "-c", "import time; time.sleep(60)"], timeout=1, start_new_session=True)
                 except subprocess.TimeoutExpired:
                     pass
-                round(time.monotonic() - start)
+                time.monotonic() - start
                 """
             )
         )
-        assert code_output.output == "1"
+        # Killed at its 1 s timeout rather than sleeping out its 60 s; the
+        # spawn before it takes longer on some hosts (over a second on the
+        # arm64 runners), so not "about 1 s".
+        assert 1 <= float(code_output.output) < 30
