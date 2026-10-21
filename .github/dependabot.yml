@@ -34,6 +34,23 @@ updates:
       - dependency-name: hyperlight-*
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
+  # Apart from the others, without ci/arm64: CI builds and tests it on Linux
+  # x86_64 only, so the arm64 run would check nothing of it.
+  - package-ecosystem: cargo
+    directory: /integrations/clickhouse
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    labels: [dependencies]
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: hyperlight-*
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
