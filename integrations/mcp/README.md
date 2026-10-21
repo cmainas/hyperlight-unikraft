@@ -4,7 +4,7 @@
 
 An [MCP](https://modelcontextprotocol.io) server that runs Python in a local Hyperlight micro-VM, for any MCP client: Claude Code, Claude Desktop, VS Code, Cursor and others.
 
-The server boots a Unikraft unikernel in its own hardware-isolated micro-VM (KVM or MSHV on Linux, WHP on Windows) through the `hluk` CLI. It needs no account, no daemon and no API key, and the code and its data stay on your machine. The guest has no network access unless you allow hosts with `--net-allow`, and none of your files unless you mount them.
+The server boots a Unikraft unikernel in its own hardware-isolated micro-VM (KVM or MSHV on Linux, WHP on Windows, HVF on Apple silicon Macs) through the `hluk` CLI. It needs no account, no daemon and no API key, and the code and its data stay on your machine. The guest has no network access unless you allow hosts with `--net-allow`, and none of your files unless you mount them.
 
 | | Pyodide servers | cloud sandboxes | **mcp-server-hyperlight** |
 |---|---|---|---|
@@ -16,7 +16,7 @@ The server boots a Unikraft unikernel in its own hardware-isolated micro-VM (KVM
 
 ## Install
 
-Install `hluk` v0.18.0 or later. On Linux:
+Install `hluk` v0.18.0 or later. On Linux or macOS:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hyperlight-dev/hyperlight-unikraft/main/install.sh | sh
@@ -61,6 +61,20 @@ VS Code (`.vscode/mcp.json`):
   }
 }
 ```
+
+Codex (`~/.codex/config.toml`), with time for `uvx` to install the server on its first start, and for the first call to wait for the guest image (`--startup-timeout`, 300 s) and then run (`--timeout`, 30 s), one call at a time:
+
+```toml
+[mcp_servers.hyperlight]
+command = "uvx"
+args = ["mcp-server-hyperlight"]
+startup_timeout_sec = 60
+tool_timeout_sec = 360
+```
+
+The OpenAI Agents SDK runs it with `MCPServerStdio(params={"command": "uvx", "args": ["mcp-server-hyperlight"]}, client_session_timeout_seconds=360)`, for the same first call; its default of 5 seconds is shorter than a call may run.
+
+Claude Desktop also takes it as a Desktop Extension, which needs no config: download `mcp-server-hyperlight-0.1.1.mcpb` from [its release](https://github.com/hyperlight-dev/hyperlight-unikraft/releases/tag/mcp-server-hyperlight-v0.1.1) and open it. It installs the server from PyPI with uv. Its settings set `--timeout` and `--net-allow`.
 
 The server starts its guest as soon as the client starts it. The first time, `hluk` pulls the `agent` image of its release (about 400 MB, a 130 MB download) and saves a warm snapshot of it booted (about 800 MB), which takes some seconds to a few minutes; after that the guest starts from the snapshot in milliseconds. The image ships CPython 3.12 with numpy, pandas, scipy, scikit-learn, matplotlib, pillow and requests. To have both ready before a client first starts the server, run `hluk run --runtime agent --exec 'print("ready")'`.
 

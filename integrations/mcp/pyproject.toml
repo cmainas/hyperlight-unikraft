@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-server-hyperlight"
-version = "0.1.0"
+version = "0.1.1"
 description = "An MCP server that runs Python in a local Hyperlight micro-VM"
 readme = "README.md"
 license = "Apache-2.0"
@@ -15,6 +15,7 @@ keywords = ["mcp", "model-context-protocol", "hyperlight", "unikraft", "sandbox"
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
+  "Operating System :: MacOS",
   "Operating System :: Microsoft :: Windows",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
@@ -45,7 +46,8 @@ Repository = "https://github.com/hyperlight-dev/hyperlight-unikraft"
 Issues = "https://github.com/hyperlight-dev/hyperlight-unikraft/issues"
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "README.md", "LICENSE"]
+# And the files tests/test_release.py reads, not all of mcpb/, where testing the extension leaves a lock and a venv
+include = ["/src", "/tests", "/server.json", "/mcpb/manifest.json", "/mcpb/pyproject.toml", "/README.md", "/LICENSE"]
 # Hatchling adds the repository's .gitignore otherwise
 exclude = [".gitignore"]
 
