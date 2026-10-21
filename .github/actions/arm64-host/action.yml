@@ -59,6 +59,13 @@ runs:
         name: rootfs-arm64
         path: build-elfloader
 
+    # An artifact keeps no file modes, and a mount gives the guest the
+    # host's: the test binaries must be executable again to run
+    - name: Make the test binaries executable
+      if: runner.os != 'Windows'
+      shell: bash
+      run: chmod -R a+x build-elfloader/bins
+
     # Not setup-python, which installs Python with sudo on macOS, which the
     # self-hosted Mac does not allow.
     - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
