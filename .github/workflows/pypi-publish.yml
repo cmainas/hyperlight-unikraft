@@ -1,8 +1,9 @@
 # Publish one of the Python packages in integrations/ to PyPI:
 # `smolagents-hyperlight` (integrations/smolagents) or `mcp-server-hyperlight`
-# (integrations/mcp). Manual; a dry run unless `dry_run` is set to false, and
-# only from main. The version is the one in the package's pyproject.toml,
-# released on its own schedule rather than with hluk's.
+# (integrations/mcp), which is then listed in the MCP Registry, and give the
+# version a GitHub release. Manual; a dry run unless `dry_run` is set to
+# false, and only from main. The version is the one in the package's
+# pyproject.toml, released on its own schedule rather than with hluk's.
 name: Publish to PyPI
 
 on:
@@ -23,6 +24,13 @@ on:
 permissions:
   contents: read
 
+# One publishing run of a package at a time: two would both find the registry entry and the release missing, and
+# race to make them. Dry runs in a group of their own, so that none waits for a real one held for its approval. A
+# group keeps one run pending: dispatching a third cancels the one that waited.
+concurrency:
+  group: pypi-publish-${{ inputs.package }}-${{ inputs.dry_run && 'dry-run' || 'publish' }}
+  cancel-in-progress: false
+
 env:
   PACKAGE: ${{ inputs.package }}
   # The choice names the PyPI project, whose source is under integrations/
@@ -30,11 +38,16 @@ env:
   # A choice named here only: an unknown one names no directory, and the build
   # fails rather than publish another package's
   PACKAGE_DIR: integrations/${{ inputs.package == 'mcp-server-hyperlight' && 'mcp' || inputs.package == 'smolagents-hyperlight' && 'smolagents' || 'unknown' }}
+  # Bumped by hand: Dependabot does not read these
+  MCP_PUBLISHER_URL: https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+  MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
 
 jobs:
   # Builds without the token: only the publish job below can mint one.
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,14 +64,86 @@ jobs:
           echo "::error::$PACKAGE is published from main only"
           exit 1
 
-      # Only a warning: the upload skips the files PyPI has, so a run after
-      # one that uploaded part of a version uploads the rest
-      - name: Check version not already published
+      - name: Read the version
+        id: version
         working-directory: ${{ env.PACKAGE_DIR }}
+        # The first, as tests/test_release.py reads it: [project]'s, above any table of tools
         run: |
-          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
-          if curl -sf "https://pypi.org/pypi/$PACKAGE/$VERSION/json" > /dev/null; then
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -n 1)
+          # Every name the later jobs make, the tag among them, has it
+          if [ -z "$VERSION" ]; then
+            echo "::error::No version = \"...\" line in $PACKAGE_DIR/pyproject.toml"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Whether PyPI has the version, for the check below: a run that uploaded part of a version is finished by
+      # re-running its failed jobs, whose upload skips the files PyPI has. From the simple index, not the version's JSON, which the MCP
+      # Registry reads: a 404 for it now could stay cached past the upload.
+      - name: Look the version up on PyPI
+        id: pypi
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          STATUS=$(curl -s --max-time 30 -o "$RUNNER_TEMP/simple.html" -w '%{http_code}' "https://pypi.org/simple/$PACKAGE/") || true
+          # A 404: no version of the package yet. Anything but that or a 200 fails, rather than pass for none.
+          if [ "$STATUS" = 200 ] && grep -qE "${PACKAGE//-/_}-${VERSION//./\\.}(\\.tar\\.gz|-py)" "$RUNNER_TEMP/simple.html"; then
             echo "::warning::$PACKAGE $VERSION is already on PyPI"
+            echo "on_pypi=true" >> "$GITHUB_OUTPUT"
+          elif [ "$STATUS" = 200 ] || [ "$STATUS" = 404 ]; then
+            echo "on_pypi=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::PyPI answered $STATUS for $PACKAGE"
+            exit 1
+          fi
+
+      # Before anything is published, dry runs too: a tag pushed beforehand, which can be signed, is the GitHub
+      # release's, and must be on the commit the run builds, or the release's files would not be its source's
+      - name: Check the tag and the release, if there are any
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ON_PYPI: ${{ steps.pypi.outputs.on_pypi }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          TAG="$PACKAGE-v$VERSION"
+          # A dry run publishes nothing, so it reports what a real run would refuse, and goes on
+          refuse() {
+            if [ "$DRY_RUN" = true ]; then
+              echo "::warning::$1"
+            else
+              echo "::error::$1"
+              exit 1
+            fi
+          }
+          # An empty list when there is no tag; an error fails the step, rather than pass for none
+          REF=$(gh api "repos/$GH_REPO/git/matching-refs/tags/$TAG" \
+            --jq ".[] | select(.ref == \"refs/tags/$TAG\") | .object | \"\(.type) \(.sha)\"")
+          if [ -n "$REF" ]; then
+            read -r TYPE TAGGED <<< "$REF"
+            # A signed tag is an object of its own, which names the commit, or another tag
+            while [ "$TYPE" = tag ]; do
+              # Assigned first, so that a failed call fails the step rather than read as no commit
+              OBJECT=$(gh api "repos/$GH_REPO/git/tags/$TAGGED" --jq '"\(.object.type) \(.object.sha)"')
+              read -r TYPE TAGGED <<< "$OBJECT"
+            done
+            if [ "$TAGGED" != "$GITHUB_SHA" ]; then
+              refuse "$TAG is on $TAGGED, not on $GITHUB_SHA, which this run builds"
+            fi
+          fi
+          # A version on PyPI with no published release: a run that uploaded it and failed later, which a re-run of
+          # its failed jobs finishes. This run would build its files again, which may differ from PyPI's, and release
+          # those. Published releases only: this job's token cannot see drafts, which the release job publishes.
+          if [ "$ON_PYPI" = true ]; then
+            if gh api "repos/$GH_REPO/releases/tags/$TAG" --jq .id > /dev/null 2> "$RUNNER_TEMP/release.err"; then
+              :
+            elif grep -q "HTTP 404" "$RUNNER_TEMP/release.err"; then
+              refuse "$PACKAGE $VERSION is on PyPI without a published $TAG release: re-run the failed jobs of the run that uploaded it, or, if they cannot succeed, bump the version"
+            else
+              cat "$RUNNER_TEMP/release.err"
+              exit 1
+            fi
           fi
 
       - name: Build
@@ -73,6 +158,42 @@ jobs:
         with:
           name: dist
           path: ${{ env.PACKAGE_DIR }}/dist/
+          if-no-files-found: error
+
+      # The registry entry and the Desktop Extension of mcp-server-hyperlight, checked before anything is published
+      - name: Validate the MCP Registry entry
+        if: ${{ inputs.package == 'mcp-server-hyperlight' }}
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          curl -fsSL --max-time 120 -o "$RUNNER_TEMP/mcp-publisher.tar.gz" "$MCP_PUBLISHER_URL"
+          echo "$MCP_PUBLISHER_SHA256  $RUNNER_TEMP/mcp-publisher.tar.gz" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/mcp-publisher.tar.gz" -C "$RUNNER_TEMP" mcp-publisher
+          "$RUNNER_TEMP/mcp-publisher" validate
+
+      # Before anything is published, whether or not CI passed on the commit: server.json, the extension and the
+      # README's link to it name the version, which a run publishes all of
+      - name: Check the version everywhere it is named
+        if: ${{ inputs.package == 'mcp-server-hyperlight' }}
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          # Bumped by hand: Dependabot does not read workflow run lines
+          python -m pip install pytest==8.4.2
+          python -m pytest -q -p no:cacheprovider tests/test_release.py
+
+      # Without npm's code in the job whose files are published: CI validates the same packer's output
+      - name: Pack the Desktop Extension
+        if: ${{ inputs.package == 'mcp-server-hyperlight' }}
+        working-directory: ${{ env.PACKAGE_DIR }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python pack_mcpb.py "mcp-server-hyperlight-$VERSION.mcpb"
+
+      # Not in dist/, which is uploaded to PyPI as it is
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ inputs.package == 'mcp-server-hyperlight' }}
+        with:
+          name: mcpb
+          path: ${{ env.PACKAGE_DIR }}/*.mcpb
           if-no-files-found: error
 
   publish:
@@ -97,3 +218,149 @@ jobs:
         with:
           # What a version already has on PyPI is left as it is
           skip-existing: true
+
+  # The registry reads the package's README on PyPI for its name, so the entry follows the upload
+  mcp-registry:
+    needs: [build, publish]
+    if: ${{ inputs.package == 'mcp-server-hyperlight' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # MCP Registry login for io.github.hyperlight-dev (OIDC)
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Wait for the version on PyPI
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # The simple index only, not the version's JSON, which the registry reads to check the package's README:
+          # polling it while PyPI catches up could leave its 404 cached for the registry's own read. The publish
+          # below tries again once, should that read lag.
+          for attempt in $(seq 60); do
+            # To a file, then grep: in a pipe, grep -q leaving early could fail curl, and with it the match
+            if curl -sf --max-time 30 -o "$RUNNER_TEMP/simple.html" "https://pypi.org/simple/$PACKAGE/" \
+              && grep -qE "${PACKAGE//-/_}-${VERSION//./\\.}(\\.tar\\.gz|-py)" "$RUNNER_TEMP/simple.html"; then
+              exit 0
+            fi
+            [ "$attempt" = 60 ] || sleep 10
+          done
+          echo "::error::$PACKAGE $VERSION is not on PyPI after 10 minutes"
+          exit 1
+
+      - name: Publish to the MCP Registry
+        working-directory: ${{ env.PACKAGE_DIR }}
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # As the upload skips the files PyPI has: a re-run after the entry was published succeeds
+          NAME=$(jq -r .name server.json)
+          # The registry's answer for the version: 200 listed, 404 not, 000 unreachable, which curl prints itself
+          status() {
+            curl -s --max-time 30 -o /dev/null -w '%{http_code}' \
+              "https://registry.modelcontextprotocol.io/v0.1/servers/${NAME/\//%2F}/versions/$VERSION" || true
+          }
+          # Only a 404 means the registry lacks the version: another answer fails here rather than publish again
+          STATUS=$(status)
+          if [ "$STATUS" = 200 ]; then
+            echo "::warning::$NAME $VERSION is already in the MCP Registry"
+            exit 0
+          elif [ "$STATUS" != 404 ]; then
+            echo "::error::The MCP Registry answered $STATUS for $NAME $VERSION"
+            exit 1
+          fi
+          curl -fsSL --max-time 120 -o "$RUNNER_TEMP/mcp-publisher.tar.gz" "$MCP_PUBLISHER_URL"
+          echo "$MCP_PUBLISHER_SHA256  $RUNNER_TEMP/mcp-publisher.tar.gz" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/mcp-publisher.tar.gz" -C "$RUNNER_TEMP" mcp-publisher
+          "$RUNNER_TEMP/mcp-publisher" login github-oidc
+          # Again a little later, should the registry's own read of PyPI lag behind the one above; unless an attempt
+          # that reported a failure was stored after all
+          # Once more only: a rejection of the entry itself fails the same way each time
+          for attempt in 1 2; do
+            "$RUNNER_TEMP/mcp-publisher" publish && exit 0
+            # The registry a moment to show what a failed attempt may have stored; unreachable is a "not yet"
+            sleep 30
+            [ "$(status)" = 200 ] && exit 0
+            [ "$attempt" = 2 ] || sleep 30
+          done
+          exit 1
+
+  # What was published, and the Desktop Extension, which has no other home. Not `Latest`, which stays hluk's.
+  github-release:
+    needs: [build, publish, mcp-registry]
+    # Last, so that a release, which a re-run takes as done, means the registry lists the version too; with
+    # smolagents-hyperlight, which the registry job skips, after the upload alone
+    if: ${{ !cancelled() && needs.publish.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.mcp-registry.result) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the release, and its tag where there is none
+    steps:
+      # Each by name, into a directory of its own: one artifact downloaded without a name lands in the path itself
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: artifacts/dist/
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: ${{ inputs.package == 'mcp-server-hyperlight' }}
+        with:
+          name: mcpb
+          path: artifacts/mcpb/
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          TAG="$PACKAGE-v$VERSION"
+          shopt -s nullglob
+          FILES=(artifacts/dist/* artifacts/mcpb/*.mcpb)
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "::error::No files to release"
+            exit 1
+          fi
+          # The tag's commit, peeled through signed tags, or nothing: checked again here, as one can be pushed while
+          # the run waits for its approval, and gh release create takes an existing tag over --target
+          REF=$(gh api "repos/$GH_REPO/git/matching-refs/tags/$TAG" \
+            --jq ".[] | select(.ref == \"refs/tags/$TAG\") | .object | \"\(.type) \(.sha)\"")
+          TAGGED=
+          if [ -n "$REF" ]; then
+            read -r TYPE TAGGED <<< "$REF"
+            while [ "$TYPE" = tag ]; do
+              # Assigned first, so that a failed call fails the step rather than read as no commit
+              OBJECT=$(gh api "repos/$GH_REPO/git/tags/$TAGGED" --jq '"\(.object.type) \(.object.sha)"')
+              read -r TYPE TAGGED <<< "$OBJECT"
+            done
+            if [ "$TAGGED" != "$GITHUB_SHA" ]; then
+              echo "::error::$TAG is on $TAGGED, not on $GITHUB_SHA, which this run built"
+              exit 1
+            fi
+          fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            # A draft, which a run cut short leaves, is finished only if it is this commit's: publishing it makes its
+            # tag on its own target
+            if [ "$DRAFT" = true ] && [ -z "$TAGGED" ] \
+              && [ "$(gh release view "$TAG" --json targetCommitish --jq .targetCommitish)" != "$GITHUB_SHA" ]; then
+              echo "::error::The draft release $TAG is not on $GITHUB_SHA, which this run built: delete it, or point it there"
+              exit 1
+            fi
+            # A re-run adds what the release lacks and keeps what it has, as PyPI does: a rebuilt file differs
+            HAS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+            MISSING=()
+            for file in "${FILES[@]}"; do
+              grep -qxF "$(basename "$file")" <<< "$HAS" || MISSING+=("$file")
+            done
+            if [ ${#MISSING[@]} -gt 0 ]; then
+              gh release upload "$TAG" "${MISSING[@]}"
+            fi
+            if [ "$DRAFT" = true ]; then
+              gh release edit "$TAG" --draft=false --latest=false
+            fi
+          else
+            gh release create "$TAG" "${FILES[@]}" --target "$GITHUB_SHA" --latest=false \
+              --title "$PACKAGE $VERSION" --notes "https://pypi.org/project/$PACKAGE/$VERSION/"
+          fi
