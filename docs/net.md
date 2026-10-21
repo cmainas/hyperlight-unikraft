@@ -92,8 +92,9 @@ All functions return negative `-errno` values on error.
 | `AllowAll` | Everything, except the metadata addresses. |
 | `AllowList(AllowList)` | Only the listed names and addresses. |
 | `BlockList(BlockList)` | Everything except the listed names and addresses. |
+| `Filter(Filter)` | What the embedder's `NetworkFilter` allows, by name and port, asked at every question and connect. |
 
-Under every variant the cloud metadata addresses are refused: the link-local ranges (`169.254.0.0/16`, `fe80::/10`) and AWS's IPv6 endpoint `fd00:ec2::254`.  The two lists also refuse loopback, since a guest socket is a host socket and host services trust `127.0.0.1`; `AllowAll` permits it, so a server and a client can meet inside one guest.  An IPv4 address written as IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is judged as `a.b.c.d`.
+Under every variant the cloud metadata addresses are refused: the link-local ranges (`169.254.0.0/16`, `fe80::/10`) and AWS's IPv6 endpoint `fd00:ec2::254`.  The two lists and a filter also refuse loopback, since a guest socket is a host socket and host services trust `127.0.0.1`; `AllowAll` permits it, so a server and a client can meet inside one guest.  An IPv4 address written as IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is judged as `a.b.c.d`.
 
 ### Where it is checked
 
@@ -116,6 +117,36 @@ Nothing else is inspected.
 **What that promises.**  An allow list refuses everything it was not told about.  A block list refuses the name in every question and every address the name is known to have; it cannot refuse an address the guest obtained some other way that the name is not currently shown to have, which no name-based rule can.  An embedder who needs a guarantee lists what is allowed.
 
 Both lists take names and addresses, `AllowList::from_hosts(&["example.com", "10.0.0.5"])?`; a name that does not resolve when the list is built is a `ResolveError`.
+
+### Filter
+
+An embedder with rules of its own, finer than a list of names, or that change while the guest runs, implements `NetworkFilter` and passes `NetworkPolicy::Filter(Filter::new(filter))`, or `Filter::from_arc` to keep a handle on it:
+
+```rust,no_run
+use std::sync::{Arc, RwLock};
+use hyperlight_unikraft::{Destination, Filter, NetworkFilter, NetworkPolicy, SandboxBuilder};
+
+/// HTTPS to the listed names, which the embedder edits as the guest runs.
+struct Https(RwLock<Vec<String>>);
+
+impl NetworkFilter for Https {
+    fn allows_name(&self, name: &str) -> bool {
+        self.0.read().unwrap().iter().any(|n| n == name)
+    }
+    fn allows(&self, d: &Destination<'_>) -> bool {
+        d.addr.port() == 443 && d.names.iter().any(|n| self.allows_name(n))
+    }
+}
+
+let https = Arc::new(Https(RwLock::new(vec!["pypi.org".into()])));
+let sandbox = SandboxBuilder::from_initrd("rootfs/python.cpio")
+    .network(NetworkPolicy::Filter(Filter::from_arc(https.clone())))
+    .boot()?;
+https.0.write().unwrap().push("files.pythonhosted.org".into());
+# Ok::<(), hyperlight_unikraft::Error>(())
+```
+
+It is asked the two things the host can tell: `allows_name(name)` for each name in a DNS question, in lower case without the trailing dot, and `allows(&Destination)` for each connect and `sendto`, with the address, whether the socket is UDP, and `names`, the names whose answers gave the guest that address (recorded as under an allow list: only answers from a resolver the guest may ask, only for names `allows_name` allows; empty for an address the guest did not get from DNS).  Both are asked every time, so a change to what the filter allows applies from the next question or connect, without booting again.  Before the filter is asked, loopback and the metadata addresses are refused and the resolvers an allow list exempts take questions on UDP port 53, as under `AllowList`.  The host sees no further than the address, the port and the names DNS gave the address: the scheme, path and method of what goes over the socket are not visible to a filter, nor which of the sites sharing an address (a CDN, a shared host) the guest talks to.  It runs while the guest is stopped in a host call, so it should answer from memory and must not call into the sandbox; a panic in it counts as a refusal.  `allows_name` is asked again when an answer arrives, before its addresses are credited to the name.  Answers over TCP are not read, so an address the guest learns only that way is not credited to its name.  What a `Filter` records is shared by its clones: give each sandbox its own, made with `Filter::from_arc` from the one filter to share the rules.
 
 ### ListenPorts
 
