@@ -64,7 +64,7 @@ smolagents then passes `executor_kwargs` to `HyperlightExecutor` and installs th
 |---|---|---|
 | `additional_imports` | none | Packages to install in the guest, with pip for those not in the image (which needs `net_allow` to include the package index) |
 | `logger` | an `AgentLogger` at `INFO` | |
-| `net_allow` | none | Hosts or IPs the guest may connect to. With none, every connection is refused and the guest cannot listen on a port |
+| `net_allow` | none | Hosts or IPs the guest may connect to. With none, every connection is refused. Either way the guest cannot listen on a port of its own; `hluk_args=["--port", ...]` opens one |
 | `runtime` | `"agent"` | Published image to run, by name or full reference |
 | `initrd` | | Path to a rootfs CPIO of your own to run instead (it must have CPython 3) |
 | `scratch_mb` | the image's | Guest memory in MiB |

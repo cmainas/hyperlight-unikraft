@@ -661,6 +661,7 @@ fn python_tcp_bidir() {
     let mut sandbox = SandboxBuilder::from_initrd(rootfs)
         .scratch_mb(256)
         .network(NetworkPolicy::AllowAll)
+        .listen_ports(ListenPorts::from_ports([9998]))
         .boot()
         .unwrap();
 
@@ -679,6 +680,7 @@ fn python_http_server_client() {
     let mut sandbox = SandboxBuilder::from_initrd(rootfs)
         .scratch_mb(256)
         .network(NetworkPolicy::AllowAll)
+        .listen_ports(ListenPorts::from_ports([9997]))
         .boot()
         .unwrap();
 
@@ -712,6 +714,7 @@ fn python_threaded_select() {
     let mut sandbox = SandboxBuilder::from_initrd(rootfs)
         .scratch_mb(256)
         .network(NetworkPolicy::AllowAll)
+        .listen_ports(ListenPorts::from_ports([9123]))
         .boot()
         .unwrap();
 

@@ -178,9 +178,11 @@ pub struct RunArgs {
 
     /// Ports the guest may bind to for inbound connections: a port, a
     /// range LOW-HIGH, or `all` (repeatable); replaces a project's ports.
-    /// Without this flag or a project's ports, bind() is rejected
-    /// (outbound-only). Without --net, --net-allow, --net-block or a
-    /// project's policy, the guest serves on them but may connect nowhere.
+    /// Without this flag or a project's ports, bind() is rejected but for
+    /// port 0: the guest may serve only on a port the host picks, and may
+    /// not choose its source port either. Without --net, --net-allow,
+    /// --net-block or a project's policy, the guest serves on them but may
+    /// connect nowhere.
     #[arg(long = "port", value_name = "PORT|LOW-HIGH|all")]
     ports: Vec<PortSpec>,
 
