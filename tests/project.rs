@@ -10,7 +10,7 @@
 mod common;
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use common::{require_rootfs, temp_dir};
 
@@ -544,6 +544,53 @@ fn an_explicit_initrd_runs_cold_unless_asked_to_warm() {
     let t = text(&out);
     assert!(out.status.success(), "{t}");
     assert!(t.contains("restored=true") && t.contains("again"), "{t}");
+}
+
+/// Concurrent first runs of one guest each save a snapshot of their own
+/// and move it in whole: all of them run (they used to delete each other's
+/// half-written snapshot and fail), and one snapshot is left, with no part
+/// beside it.
+#[test]
+fn concurrent_first_runs_of_a_guest_all_run() {
+    let root = temp_dir("project-concurrent");
+    let cache = temp_dir("project-concurrent-cache");
+    let rootfs = require_rootfs("python");
+    let rootfs = rootfs.to_str().unwrap();
+    let runs: Vec<_> = (0..8)
+        .map(|i| {
+            Command::new(env!("CARGO_BIN_EXE_hluk"))
+                .args([
+                    "run",
+                    "--initrd",
+                    rootfs,
+                    "--warm",
+                    "--exec",
+                    &format!("print('run {i}')"),
+                ])
+                .current_dir(root.path())
+                .env("HLUK_CACHE_DIR", cache.path())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("failed to run hluk")
+        })
+        .collect();
+    for (i, run) in runs.into_iter().enumerate() {
+        let out = run.wait_with_output().unwrap();
+        let t = text(&out);
+        assert!(
+            out.status.success() && t.contains(&format!("run {i}")),
+            "run {i}: {t}"
+        );
+    }
+    assert_eq!(snapshots(cache.path()).len(), 1);
+    let parts: Vec<_> = std::fs::read_dir(cache.path().join("snapshots"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "part"))
+        .collect();
+    assert!(parts.is_empty(), "left behind: {parts:?}");
 }
 
 #[test]
