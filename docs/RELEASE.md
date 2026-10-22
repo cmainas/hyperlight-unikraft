@@ -44,7 +44,7 @@ Each push to `main` whose CI passes replaces the `dev` channel, so the latest `m
 
 | What | Where |
 |---|---|
-| `hluk` for the four release targets, and a `SHA256SUMS` | the `dev` pre-release; the `dev` tag moves to the commit |
+| `hluk` for the five release targets, and a `SHA256SUMS` | the `dev` pre-release; the `dev` tag moves to the commit |
 | every runtime, busybox, the kernel and the urunc image | tagged with the commit: `:dev-<sha7>`, and `:initrd-dev-<sha7>` for the CPIO, multi-platform |
 
 A dev `hluk` is built with `HLUK_CHANNEL=dev-<sha7>`, so it pulls the images of its own commit, and `hluk --version` prints its build (`0.17.0+dev.44ee170`). A newer dev build asks for newer tags, so no cache or Docker build hands it an older build's images. `HLUK_VERSION=dev` makes `install.sh` and `install.ps1` install it, and they refuse it while its `SHA256SUMS` is being replaced.

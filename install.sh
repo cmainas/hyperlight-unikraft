@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/hyperlight-dev/hyperlight-unikraft/main/install.sh | sh
 #
-#   HLUK_VERSION=v0.18.0   a release instead of the latest
+#   HLUK_VERSION=v0.19.0   a release instead of the latest
 #   HLUK_VERSION=dev       the dev build: main's latest push that passed CI
 #   HLUK_INSTALL_DIR=DIR   where the binary goes (default ~/.local/bin)
 #
