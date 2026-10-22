@@ -22,6 +22,22 @@ fn python_inline_code() {
     );
 }
 
+/// The image has its users and groups, so the user, its home and `~`
+/// resolve as on Linux (getpass.getuser() used to raise KeyError).
+#[test]
+fn python_knows_its_user() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run("import getpass, os, pwd; print(getpass.getuser(), pwd.getpwuid(os.getuid()).pw_dir, os.path.expanduser('~'))")
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(output.contains("root /root /root"), "got: {output:?}");
+}
+
 /// A line longer than one host call carries reaches the host whole, in
 /// several HostWrite calls the kernel cuts between characters (it used
 /// to drop all but the first 4 KiB).  How the host joins a character
