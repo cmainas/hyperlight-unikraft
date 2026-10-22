@@ -80,7 +80,7 @@ jobs:
     # Per job, not per workflow: a run whose jobs are skipped (another label
     # added) must not cancel one that is testing.  Each nightly run's groups
     # are its own: neither a run started by hand nor the next nightly cancels
-    # its jobs, or its re-run's (arm64-report.yml).  A push's are apart from
+    # its jobs, or its re-run's (ci-report.yml).  A push's are apart from
     # a run started by hand on main.
     concurrency:
       group: arm64-rootfs-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id || github.event_name == 'push' && 'cache' }}
@@ -144,7 +144,7 @@ jobs:
         with:
           name: rootfs-arm64
           path: build-elfloader
-          # As long as arm64-report.yml may re-run the jobs that use it
+          # As long as ci-report.yml may re-run the jobs that use it
           retention-days: 3
           if-no-files-found: error
 
@@ -175,7 +175,7 @@ jobs:
         with:
           name: hluk-static-arm64
           path: target/aarch64-unknown-linux-musl/release/hluk
-          # As long as arm64-report.yml may re-run the jobs that use it
+          # As long as ci-report.yml may re-run the jobs that use it
           retention-days: 3
           if-no-files-found: error
 

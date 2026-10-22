@@ -36,9 +36,17 @@ To request it, a maintainer labels the pull request `ci/arm64`. A pull request w
 
 A push to `main` runs no arm64 test, as the next nightly run does. The push's arm64 run only refreshes the guest images' cache, on a hosted runner, so that the pull requests after it need not build them. To run it on a branch, start `arm64` by hand (Actions, Run workflow); `weekly` adds Sunday's suites.
 
-[`arm64-report.yml`](../.github/workflows/arm64-report.yml) handles a failed nightly run:
+## Failures on main
+
+[`ci-report.yml`](../.github/workflows/ci-report.yml) handles a failed run on `main`: the nightly arm64 run, and the CI and arm64 runs of a push.
 
 1. It re-runs the failed jobs once.
-2. Each job that fails again gets an issue labelled `ci/nightly`, titled `arm64 nightly: <job> fails`, with the job's link, the commit and the end of its log. Each later nightly run it fails in comments on that issue while the issue is open.
+2. Each job that fails again gets an issue with the job's link, the commit and the end of its log. Each later run it fails in comments on that issue while the issue is open.
 
-A job that reaches its timeout counts as failed; a run cancelled by hand does not. A run that does not start, because GitHub refused `arm64.yml`, `arm64-jobs.yml` or an action they use, gets an issue at once. The reporter runs when an arm64 run ends and every two hours, and reports each failed job once per attempt of a run.
+| Run | Issue title | Label |
+|---|---|---|
+| nightly arm64 | `arm64 nightly: <job> fails` | `ci/nightly` |
+| CI, on a push | `CI on main: <job> fails` | `ci/main` |
+| arm64, on a push (the images' cache) | `arm64 on main: <job> fails` | `ci/main` |
+
+Of a push's runs, only the newest of each workflow is re-run: an older commit's re-run would cancel the newer one's, and its failures may be fixed already. An older run is reported only when it failed again. A CI run that passes on its re-run may start no dev build, as GitHub starts no workflow for most of what a workflow's token does: the next push's run does, or start `dev.yml` by hand. A job that reaches its timeout counts as failed; a run cancelled by hand, or by a newer push, does not. `ci-passed` is reported only when it fails alone. A run that does not start, because GitHub refused the workflow file or an action it uses, gets an issue at once. The reporter runs when such a run ends and every two hours, and reports each failed job once per attempt of a run.

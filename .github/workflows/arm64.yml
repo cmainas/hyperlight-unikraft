@@ -20,7 +20,7 @@ name: arm64
 #   under nested virtualization, where a guest's first touch of each page is
 #   slow: there the agent, Java, node, .NET JIT and PowerShell suites, and
 #   the agent benchmarks, take hours (agent's about 30 times as long as on
-#   the Mac), so they run on Sundays' run only.  arm64-report.yml re-runs a
+#   the Mac), so they run on Sundays' run only.  ci-report.yml re-runs a
 #   failed nightly once, then files what still fails as issues.
 #
 # A push to main tests nothing, as the next nightly run does.  Its run only
