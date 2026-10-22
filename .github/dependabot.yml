@@ -4,9 +4,12 @@
 # directories. Anything that has to move in step with
 # something Dependabot cannot see is left out and bumped by hand. Cargo and
 # action security updates still come, listed directories or not; Docker has
-# none. The pull requests for the directories below are labelled ci/arm64
-# too, so the arm64 tests run on them and ci-passed waits for those before
-# they can be merged.
+# none. The updates that can break an arm64 guest are labelled ci/arm64
+# too, so that tier 2 of docs/ci.md runs on them and ci-passed waits for it:
+# the main crate's (Hyperlight among them) and the guest-side wasmtime
+# crates, one entry that Dependabot cannot split, and the images' bases, the
+# kernel's included. The rest, the actions and ClickHouse's crates, get
+# tier 1, and the nightly run tests them on arm64 once merged.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -35,8 +38,8 @@ updates:
       - dependency-name: hyperlight-*
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
-  # Apart from the others, without ci/arm64: CI builds and tests it on Linux
-  # x86_64 only, so the arm64 run would check nothing of it.
+  # Apart from the others, without ci/arm64: it is tested on Linux alone,
+  # and tier 2 has no Linux host; the nightly run tests it on Linux arm64.
   - package-ecosystem: cargo
     directory: /integrations/clickhouse
     schedule:
@@ -62,7 +65,7 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
-    labels: [dependencies, ci/arm64]
+    labels: [dependencies]
     groups:
       actions:
         patterns: ["*"]
