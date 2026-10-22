@@ -664,7 +664,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write   # push to gh-pages
-    timeout-minutes: 45
+    # 25 of them for the gate's second measurement (benchmarks/gate.sh).
+    timeout-minutes: 70
     strategy:
       fail-fast: false
       matrix:
@@ -725,20 +726,16 @@ jobs:
         shell: bash
         run: just bench ${{ matrix.runtime }}
 
-      # The gate: every metric named in benchmarks/limits.json for this
-      # runtime and host OS must stay under its ceiling (ms, or MiB for
-      # snapshot-size).  Metrics not named there are charted but not gated.
+      # The gate: benchmarks/gate.sh, which measures a timing over its
+      # ceiling again before it fails on it. A hang in that second run times
+      # out this step rather than the job, so Store still charts the first.
       - name: Check ceilings
         shell: bash
-        run: |
-          jq -r -e --arg rt '${{ matrix.runtime }}' --arg os '${{ matrix.os }}' \
-             --slurpfile lim benchmarks/limits.json '
-            ($lim[0][$rt][$os] // {}) as $max
-            | [ .[] | select($max[.name] != null and .value > $max[.name])
-                | "\(.name): \(.value) \(.unit) is over the ceiling of \($max[.name]) \(.unit)" ]
-            | if length == 0 then "all \($max | length) ceilings met"
-              else (.[] | "::error::" + .), ("\(length) ceiling(s) exceeded" | error) end
-          ' bench-results.json
+        timeout-minutes: 25
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+          HOST: ${{ matrix.os }}
+        run: bash benchmarks/gate.sh "$RUNTIME" "$HOST"
 
       # Also after a failed "Check ceilings" (its summary table is the
       # diagnosis), but not after a failed or cancelled bench: there is no

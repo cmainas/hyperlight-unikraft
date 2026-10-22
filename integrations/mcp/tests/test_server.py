@@ -811,17 +811,20 @@ class StdioTests:
 
 
 def _is_running(pid):
+    # /proc alone, where there is one: a kill(pid, 0) first leaves a window in which the process is reaped and the
+    # read then fails with ESRCH. A zombie, exited but not reaped, is as good as gone
+    try:
+        with open(f"/proc/{pid}/stat") as stat:
+            return stat.read().split(")")[-1].split()[0] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        if os.path.isdir("/proc/self"):
+            return False
+    # Without /proc (macOS) there is no telling a zombie from a process that runs, so it runs: no test passes on a guess
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    # A zombie, exited but not reaped, is as good as gone. Without /proc (macOS) there is no telling one from a
-    # process that runs, so it runs: no test passes on a guess
-    try:
-        with open(f"/proc/{pid}/stat") as stat:
-            return stat.read().split(")")[-1].split()[0] != "Z"
-    except FileNotFoundError:
-        return not os.path.isdir("/proc/self")
+    return True
 
 
 @pytest.fixture

@@ -1,6 +1,7 @@
 # Grouped version updates once a month, each group one pull request across
-# its directories. Outside the wasmtime group, a cargo or action major comes
-# on its own, one per directory. Anything that has to move in step with
+# its directories. Outside the wasmtime group, a cargo major comes on its
+# own, one per directory; an action major on its own, across its
+# directories. Anything that has to move in step with
 # something Dependabot cannot see is left out and bumped by hand. Cargo and
 # action security updates still come, listed directories or not; Docker has
 # none. The pull requests for the directories below are labelled ci/arm64
@@ -52,7 +53,8 @@ updates:
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: github-actions
-    # / covers .github/workflows only: each composite action is listed too.
+    # / covers .github/workflows and a root action.yml, not the composite
+    # actions under .github/actions: those are listed too.
     directories:
       - /
       - /.github/actions/*
@@ -68,6 +70,12 @@ updates:
         # holds up no other action.
         exclude-patterns: [crate-ci/typos]
         update-types: [minor, patch]
+      # One pull request per action across the workflows and the composite
+      # actions, so that no merge leaves them on different majors.
+      majors:
+        patterns: ["*"]
+        update-types: [major]
+        group-by: dependency-name
 
   # Digest refreshes and patch releases only: a new minor or major tag
   # (python 3.13, alpine 3.21, dotnet 10) changes what a rootfs ships and
