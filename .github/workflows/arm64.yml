@@ -8,11 +8,11 @@ name: arm64
 #
 # - Tier 2, on pull requests labelled ci/arm64: macOS and Windows.  Only
 #   maintainers can label, and Dependabot labels the updates that can break
-#   an arm64 guest (dependabot.yml).  ci-passed waits for this run on those
-#   already labelled when ci-passed starts.  A pull request from a fork
-#   runs when it is labelled, not on its later pushes: remove and re-add the
-#   label to test new commits.  That keeps honest runs deliberate; it is no
-#   security boundary, since a fork's pull request brings its own copy of
+#   an arm64 host or guest (dependabot.yml).  ci-passed waits for this run
+#   on those already labelled when ci-passed starts.  A pull request from a
+#   fork runs when it is labelled, not on its later pushes: remove and re-add
+#   the label to test new commits.  That keeps honest runs deliberate; it is
+#   no security boundary, since a fork's pull request brings its own copy of
 #   this file.  Outside code is kept off the runners by the setting that
 #   requires approval before a fork's workflows run.
 # - Tier 3, nightly on main, blocking nothing: all three hosts, Linux

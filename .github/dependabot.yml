@@ -1,15 +1,17 @@
 # Grouped version updates once a month, each group one pull request across
 # its directories. Outside the wasmtime group, a cargo major comes on its
 # own, one per directory; an action major on its own, across its
-# directories. Anything that has to move in step with
-# something Dependabot cannot see is left out and bumped by hand. Cargo and
-# action security updates still come, listed directories or not; Docker has
-# none. The updates that can break an arm64 guest are labelled ci/arm64
-# too, so that tier 2 of docs/ci.md runs on them and ci-passed waits for it:
-# the main crate's (Hyperlight among them) and the guest-side wasmtime
-# crates, one entry that Dependabot cannot split, and the images' bases, the
-# kernel's included. The rest, the actions and ClickHouse's crates, get
-# tier 1, and the nightly run tests them on arm64 once merged.
+# directories. Anything that has to move in step with something Dependabot
+# cannot see is left out and bumped by hand. Cargo, pip and action security
+# updates still come, listed directories or not (pip's to
+# integrations/mcp/mcpb and the templates too); Docker has none. The updates
+# that can break an arm64 host or guest are labelled ci/arm64 too, so that
+# tier 2 of docs/ci.md runs on them and ci-passed waits for it: the main
+# crate's (Hyperlight among them) and the guest-side wasmtime crates, one
+# entry that Dependabot cannot split, the Rust toolchain and the images'
+# bases, the kernel's included. The rest, the actions, ClickHouse's crates
+# and the Python integrations' libraries, get tier 1, and the nightly run
+# tests them on arm64 once merged.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -54,6 +56,41 @@ updates:
     ignore:
       - dependency-name: hyperlight-*
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # The Python integrations, libraries whose ranges CI tests at both ends
+  # (the integrations job's oldest and newest legs): widened, never raised,
+  # so a new major past a cap comes as a pull request and the floors stay.
+  # Without ci/arm64, as tier 2 would run all of itself for them: a release
+  # with no arm64 wheel shows in the nightly run.
+  - package-ecosystem: pip
+    directories:
+      - /integrations/mcp
+      - /integrations/smolagents
+      - /integrations/verl
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    versioning-strategy: widen
+    labels: [dependencies]
+    groups:
+      python:
+        patterns: ["*"]
+    ignore:
+      # Moves with the ruff CI pins (ci.yml), by hand
+      - dependency-name: ruff
+
+  # rust-toolchain.toml, which drivers/wasmtime's image follows (just
+  # build-rootfs passes it the channel): a new compiler can break any host's
+  # build, an arm64 one's included, and gains clippy lints.
+  # No cooldown: Dependabot knows no toolchain's release date.  A pull
+  # request opened on a release's day may find no rust image for it on
+  # Docker Hub yet: re-run it a day later.
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: monthly
+    labels: [dependencies, ci/arm64]
 
   - package-ecosystem: github-actions
     # / covers .github/workflows and a root action.yml, not the composite

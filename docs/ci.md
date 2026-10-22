@@ -28,7 +28,7 @@ The `ci/integrations` label adds every integration's jobs to any pull request. I
 
 [`arm64.yml`](../.github/workflows/arm64.yml) on macOS (Hypervisor.framework) and Windows arm64 (WHP): the Rust tests, the demos, the smolagents and MCP integrations, the conformance suite and the benchmarks, with the guest images built on a hosted arm64 runner.
 
-To request it, a maintainer labels the pull request `ci/arm64`. A pull request without it, or another label added, gets a single skipped `arm64` check: the jobs themselves are in [`arm64-jobs.yml`](../.github/workflows/arm64-jobs.yml), which `arm64.yml`'s one job calls. A pull request from this repository runs again on each push; one from a fork runs when labelled, so remove and re-add the label to test new commits. Dependabot labels the updates that can break an arm64 guest (Hyperlight and the other crates of `hluk`, the guest-side wasmtime crates, the images' bases): see [`dependabot.yml`](../.github/dependabot.yml).
+To request it, a maintainer labels the pull request `ci/arm64`. A pull request without it, or another label added, gets a single skipped `arm64` check: the jobs themselves are in [`arm64-jobs.yml`](../.github/workflows/arm64-jobs.yml), which `arm64.yml`'s one job calls. A pull request from this repository runs again on each push; one from a fork runs when labelled, so remove and re-add the label to test new commits. Dependabot labels the updates that can break an arm64 host or guest (Hyperlight and the other crates of `hluk`, the guest-side wasmtime crates, the Rust toolchain, the images' bases): see [`dependabot.yml`](../.github/dependabot.yml).
 
 ## Tier 3: nightly
 
