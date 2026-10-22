@@ -38,6 +38,36 @@ fn python_knows_its_user() {
     assert!(output.contains("root /root /root"), "got: {output:?}");
 }
 
+/// link() that fails, across file systems or of a directory, fails with
+/// Linux's errno, and the guest goes on (the kernel used to crash on
+/// those error paths).
+#[test]
+fn python_failed_links_return_their_errno() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run(concat!(
+            "import errno, os\n",
+            "open('/tmp/x', 'w').close()\n",
+            "os.mkdir('/tmp/d')\n",
+            "for src, dst in (('/tmp/x', '/dev/y'), ('/tmp/d', '/tmp/d2'), ('/tmp/x', '/tmp/no/y')):\n",
+            "    try:\n",
+            "        os.link(src, dst)\n",
+            "    except OSError as e:\n",
+            "        print(errno.errorcode[e.errno])\n",
+            "print('alive')\n",
+        ))
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(
+        output.contains("EXDEV\nEPERM\nENOENT\nalive"),
+        "got: {output:?}"
+    );
+}
+
 /// A line longer than one host call carries reaches the host whole, in
 /// several HostWrite calls the kernel cuts between characters (it used
 /// to drop all but the first 4 KiB).  How the host joins a character
