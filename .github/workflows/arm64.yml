@@ -4,27 +4,36 @@ name: arm64
 # runner, then the integration tests on hyperlight-dev's self-hosted arm64
 # runners (Linux/KVM, macOS/Hypervisor.framework and Windows/WHP), which
 # hosted runners cannot stand in for.  Those runners are few and shared
-# with hyperlight, so this runs on main, on demand, and on pull requests
-# labelled ci/arm64 (only maintainers can label, and Dependabot labels its
-# version updates, see dependabot.yml); ci-passed waits for this run on
-# those already labelled when ci-passed starts.  A pull request from a
-# fork runs when it is labelled, not on its later pushes: remove and re-add
-# the label to test new commits.  That keeps honest runs deliberate; it is
-# no security boundary, since a fork's pull request brings its own copy of
-# this file.  Outside code is kept off the runners by the setting that
-# requires approval before a fork's workflows run.
+# with hyperlight, so this is tiers 2 and 3 of docs/ci.md:
 #
-# Nightly, on main, it runs everything the Linux runner cannot in a
-# change's run: a small VM (2 CPUs, 3 GB) whose guests run under nested
-# virtualization, where a guest's first touch of each page is slow: the
-# agent, Java, node, .NET JIT and PowerShell suites take hours there (agent's
-# about 30 times as long as on the Mac).
+# - Tier 2, on pull requests labelled ci/arm64: macOS and Windows.  Only
+#   maintainers can label, and Dependabot labels the updates that can break
+#   an arm64 guest (dependabot.yml).  ci-passed waits for this run on those
+#   already labelled when ci-passed starts.  A pull request from a fork
+#   runs when it is labelled, not on its later pushes: remove and re-add the
+#   label to test new commits.  That keeps honest runs deliberate; it is no
+#   security boundary, since a fork's pull request brings its own copy of
+#   this file.  Outside code is kept off the runners by the setting that
+#   requires approval before a fork's workflows run.
+# - Tier 3, nightly on main, blocking nothing: all three hosts, Linux
+#   included.  Its runner is a small VM (2 CPUs, 3 GB) whose guests run
+#   under nested virtualization, where a guest's first touch of each page is
+#   slow: there the agent, Java, node, .NET JIT and PowerShell suites, and
+#   the agent benchmarks, take hours (agent's about 30 times as long as on
+#   the Mac), so they run on Sundays' run only.  arm64-report.yml re-runs a
+#   failed nightly once, then files what still fails as issues.
+#
+# Pushes to main start no run: the next nightly tests them.  Started by
+# hand, it is a nightly run of the branch; `weekly` adds Sunday's suites.
 on:
   workflow_dispatch:
+    inputs:
+      weekly:
+        description: "Sunday's suites too: Linux's slow ones and its agent benchmarks"
+        type: boolean
+        default: false
   schedule:
     - cron: "17 3 * * *"
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled]
@@ -38,7 +47,15 @@ permissions:
   contents: read
 
 jobs:
-  rootfs-arm64:
+  # What this run tests, for the other jobs, which a matrix can learn only
+  # from another job's outputs:
+  # - scope: change (tier 2), nightly or weekly (tier 3; weekly is Sunday's
+  #   nightly, or one started by hand with `weekly`);
+  # - hosts: the hosts' names, Linux in tier 3 only;
+  # - linux, macos, windows: each host's runner labels, as a JSON array for
+  #   format() to fill the 1ES pool's JobId label in, which must be unique
+  #   to each job.
+  plan:
     # On a pull request labelled ci/arm64: when that label is added, or on a
     # push to a branch of this repository (not a fork's), and not when some
     # other label is added.
@@ -48,11 +65,55 @@ jobs:
        (github.event.action == 'labeled' && github.event.label.name == 'ci/arm64' ||
         github.event.action != 'labeled' &&
         github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read    # this run's start
+    timeout-minutes: 5
+    outputs:
+      scope: ${{ steps.plan.outputs.scope }}
+      hosts: ${{ steps.plan.outputs.hosts }}
+      linux: '["self-hosted", "Linux", "arm64", "kvm"]'
+      macos: '["self-hosted", "macos", "arm64", "hvf"]'
+      # As in hyperlight's dep_build_test.yml.
+      windows: '["self-hosted", "Windows", "ARM64", "1ES.Pool=hl-windows-arm", "JobId={0}"]'
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          WEEKLY: ${{ inputs.weekly }}
+        # Sunday as of the run's start, not this job's: re-run on a Monday,
+        # Sunday's run is still the weekly one.
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            scope=change
+          elif [ "$WEEKLY" = true ]; then
+            scope=weekly
+          elif [ "$EVENT" = schedule ]; then
+            started=$(gh api "repos/$GH_REPO/actions/runs/$RUN" -q .created_at) || exit 1
+            [ "$(date -u -d "$started" +%u)" = 7 ] && scope=weekly || scope=nightly
+          else
+            scope=nightly
+          fi
+          if [ "$scope" = change ]; then
+            hosts='["macos", "windows"]'
+          else
+            hosts='["linux", "macos", "windows"]'
+          fi
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "hosts=$hosts" >> "$GITHUB_OUTPUT"
+          echo "Scope: $scope, on $hosts"
+
+  rootfs-arm64:
+    needs: plan
     # Per job, not per workflow: a run whose jobs are skipped (another label
-    # added) must not cancel one that is testing.  The nightly run's groups
-    # are its own, so that a push to main cancels none of its jobs.
+    # added) must not cancel one that is testing.  Each nightly run's groups
+    # are its own: neither a run started by hand nor the next nightly cancels
+    # its jobs, or its re-run's (arm64-report.yml).
     concurrency:
-      group: arm64-rootfs-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      group: arm64-rootfs-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
@@ -110,20 +171,18 @@ jobs:
         with:
           name: rootfs-arm64
           path: build-elfloader
-          retention-days: 1
+          # As long as arm64-report.yml may re-run the jobs that use it
+          retention-days: 3
           if-no-files-found: error
 
   # The Linux release binary is a static musl build, which nothing else on
-  # arm64 boots a guest with: built here, booted by static-boot-arm64.
+  # arm64 boots a guest with: built here, booted by static-boot-arm64, on
+  # the Linux runner, so in tier 3 only.
   static-arm64:
-    if: >-
-      github.event_name != 'pull_request' ||
-      (contains(github.event.pull_request.labels.*.name, 'ci/arm64') &&
-       (github.event.action == 'labeled' && github.event.label.name == 'ci/arm64' ||
-        github.event.action != 'labeled' &&
-        github.event.pull_request.head.repo.full_name == github.repository))
+    needs: plan
+    if: needs.plan.outputs.scope != 'change'
     concurrency:
-      group: arm64-static-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      group: arm64-static-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
@@ -143,44 +202,33 @@ jobs:
         with:
           name: hluk-static-arm64
           path: target/aarch64-unknown-linux-musl/release/hluk
-          retention-days: 1
+          # As long as arm64-report.yml may re-run the jobs that use it
+          retention-days: 3
           if-no-files-found: error
 
+  # The hosts come from the plan job, and so does each one's runner: an
+  # include naming Linux would add a job of its own when the plan leaves
+  # Linux out.
   test-arm64:
     name: test (${{ matrix.os }}-arm64)
-    needs: rootfs-arm64
+    needs: [plan, rootfs-arm64]
     concurrency:
-      group: arm64-test-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      group: arm64-test-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ github.event_name == 'schedule' && 360 || 60 }}
+    runs-on: ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('test-arm64-{0}-{1}-{2}', matrix.os, github.run_id, github.run_attempt))) }}
+    timeout-minutes: ${{ needs.plan.outputs.scope != 'change' && 360 || 60 }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # The labels hyperlight's own arm64 jobs use (dep_build_test.yml).
-          # Linux runs the suites with small guests but nightly (see the
-          # top of this file); macOS and Windows run everything.
-          - os: linux
-            runner: [self-hosted, Linux, arm64, kvm]
-            targets: >-
-              --lib --bins --test bash --test cli --test compiled
-              --test native_kernel --test networking --test project
-              --test python --test python_shell --test quickjs --test resolv
-              --test snapshot_mounts --test step --test wasmtime
-          - os: macos
-            runner: [self-hosted, macos, arm64, hvf]
-          # A 1ES pool, which wants a JobId label unique to each job, as in
-          # hyperlight's dep_build_test.yml.  As many tests at a time as
-          # `just test` runs on Windows.
-          - os: windows
-            runner:
-              - self-hosted
-              - Windows
-              - ARM64
-              - 1ES.Pool=hl-windows-arm
-              - JobId=test-arm64-windows-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
-            threads: 4
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
+    env:
+      # Linux runs the suites with small guests but on Sundays (see the top
+      # of this file); macOS and Windows run all the targets, always.
+      SMALL_GUESTS: >-
+        --lib --bins --test bash --test cli --test compiled --test fs_backend
+        --test native_kernel --test networking --test project
+        --test python --test python_shell --test quickjs --test resolv
+        --test snapshot_mounts --test step --test wasmtime
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -191,22 +239,25 @@ jobs:
       # (dev/macos-sign-and-run.sh); in parallel, the Linux runner's nested
       # guests ran past the hour.  On Windows, a small pool of WHP
       # surrogate processes, spawned when needed, as `just test` sets up;
-      # the other hosts ignore those variables.
+      # the other hosts ignore those variables.  On Windows, as many tests at
+      # a time as `just test` runs there.
       - name: cargo test
-        run: cargo test --locked ${{ github.event_name != 'schedule' && matrix.targets || '--all-targets' }}
+        run: >-
+          cargo test --locked ${{ matrix.os == 'linux' && needs.plan.outputs.scope != 'weekly' && env.SMALL_GUESTS
+          || '--all-targets' }}
         env:
-          RUST_TEST_THREADS: ${{ matrix.threads || 1 }}
+          RUST_TEST_THREADS: ${{ matrix.os == 'windows' && 4 || 1 }}
           HYPERLIGHT_MAX_SURROGATES: 8
           HYPERLIGHT_INITIAL_SURROGATES: 0
 
   # The static hluk static-arm64 built, booting a guest on the KVM runner.
   static-boot-arm64:
     name: static (linux-arm64)
-    needs: [rootfs-arm64, static-arm64]
+    needs: [plan, rootfs-arm64, static-arm64]
     concurrency:
-      group: arm64-static-boot-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      group: arm64-static-boot-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
-    runs-on: [self-hosted, Linux, arm64, kvm]
+    runs-on: ${{ fromJSON(needs.plan.outputs.linux) }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -234,27 +285,16 @@ jobs:
   # them if any did.
   demos-arm64:
     name: demos (${{ matrix.os }}-arm64)
-    needs: rootfs-arm64
+    needs: [plan, rootfs-arm64]
     concurrency:
-      group: arm64-demos-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      group: arm64-demos-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('demos-arm64-{0}-{1}-{2}', matrix.os, github.run_id, github.run_attempt))) }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: linux
-            runner: [self-hosted, Linux, arm64, kvm]
-          - os: macos
-            runner: [self-hosted, macos, arm64, hvf]
-          - os: windows
-            runner:
-              - self-hosted
-              - Windows
-              - ARM64
-              - 1ES.Pool=hl-windows-arm
-              - JobId=demos-arm64-windows-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -288,20 +328,19 @@ jobs:
   # ci.yml's integrations job, on each arm64 host.
   integrations-arm64:
     name: ${{ matrix.package }} (${{ matrix.os }}-arm64, ${{ matrix.deps }} ${{ matrix.package }}, Python ${{ matrix.python }})
-    needs: rootfs-arm64
+    needs: [plan, rootfs-arm64]
     concurrency:
-      group: arm64-${{ matrix.package }}-${{ matrix.deps }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      group: arm64-${{ matrix.package }}-${{ matrix.deps }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
-    # The 1ES pool's JobId label must be unique to each job.
     runs-on: >-
-      ${{ matrix.pool && fromJSON(format('["self-hosted", "Windows", "ARM64", "{0}", "JobId=integrations-arm64-{1}-{2}-{3}-{4}"]',
-      matrix.pool, matrix.package, matrix.deps, github.run_id, github.run_attempt)) || matrix.runner }}
+      ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('integrations-arm64-{0}-{1}-{2}-{3}-{4}',
+      matrix.package, matrix.deps, matrix.os, github.run_id, github.run_attempt))) }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         package: [smolagents, mcp, verl]
-        os: [linux, macos, windows]
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
         deps: [oldest, newest]
         # verl runs on Linux only
         exclude:
@@ -310,25 +349,16 @@ jobs:
           - package: verl
             os: windows
         include:
-          - os: linux
-            runner: [self-hosted, Linux, arm64, kvm]
-          - os: macos
-            runner: [self-hosted, macos, arm64, hvf]
-          - os: windows
-            pool: 1ES.Pool=hl-windows-arm
-          - package: smolagents
-            floors: smolagents
-          - package: mcp
-            floors: mcp smolagents-hyperlight smolagents anyio pydantic rich
-          - package: verl
-            floors: filelock
-          - package: mcp
-            deps: newest
-            requires: -e ../smolagents
           - deps: oldest
             python: "3.10"
           - deps: newest
             python: "3.12"
+    # As ci.yml's integrations job sets them
+    env:
+      FLOORS: >-
+        ${{ matrix.package == 'mcp' && 'mcp smolagents-hyperlight smolagents anyio pydantic rich'
+        || matrix.package == 'verl' && 'filelock' || 'smolagents' }}
+      REQUIRES: ${{ matrix.package == 'mcp' && matrix.deps == 'newest' && '-e ../smolagents' || '' }}
     defaults:
       run:
         shell: bash
@@ -349,10 +379,9 @@ jobs:
 
       - name: Install the package
         working-directory: integrations/${{ matrix.package }}
-        env:
-          FLOORS: ${{ matrix.floors }}
         run: |
-          python -m pip install ${{ matrix.requires }} -e '.[test]'
+          # shellcheck disable=SC2086 # empty, or an option and its value
+          python -m pip install $REQUIRES -e '.[test]'
           if [ "${{ matrix.deps }}" = oldest ]; then
             pins=
             for library in $FLOORS; do
@@ -379,14 +408,16 @@ jobs:
           HLUK_SCRATCH_MB: "1536"
         run: python -m pytest -v
 
-  # ci.yml's clickhouse job on Linux arm64, with ClickHouse's arm64 build.
+  # ci.yml's clickhouse job on Linux arm64, with ClickHouse's arm64 build:
+  # tier 3 only, with the Linux runner.
   clickhouse-arm64:
     name: clickhouse (linux-arm64)
-    needs: rootfs-arm64
+    needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'change'
     concurrency:
-      group: arm64-clickhouse-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      group: arm64-clickhouse-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
-    runs-on: [self-hosted, Linux, arm64, kvm]
+    runs-on: ${{ fromJSON(needs.plan.outputs.linux) }}
     timeout-minutes: 45
     env:
       CLICKHOUSE_VERSION: 26.9.22.3
@@ -416,31 +447,16 @@ jobs:
   # ci.yml's conformance job, on each arm64 host.
   conformance-arm64:
     name: conformance (${{ matrix.os }}-arm64)
-    needs: rootfs-arm64
+    needs: [plan, rootfs-arm64]
     concurrency:
-      group: arm64-conformance-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      group: arm64-conformance-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('conformance-arm64-{0}-{1}-{2}', matrix.os, github.run_id, github.run_attempt))) }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: linux
-            runner: [self-hosted, Linux, arm64, kvm]
-          - os: macos
-            runner: [self-hosted, macos, arm64, hvf]
-          - os: windows
-            runner:
-              - self-hosted
-              - Windows
-              - ARM64
-              - 1ES.Pool=hl-windows-arm
-              - JobId=conformance-arm64-windows-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}
-            # The pool's outbound NAT gives an FTP data connection another
-            # address than its control connection, which www.pythontest.net
-            # refuses (425 Bad IP connecting), from the host as from a guest.
-            skip: test_urllib2net
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -448,10 +464,14 @@ jobs:
 
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
+      # On Windows, without test_urllib2net: the 1ES pool's outbound NAT
+      # gives an FTP data connection another address than its control
+      # connection, which www.pythontest.net refuses (425 Bad IP
+      # connecting), from the host as from a guest.
       - name: Run CPython conformance suite
         shell: bash
         env:
-          CONFORMANCE_SKIP: ${{ matrix.skip }}
+          CONFORMANCE_SKIP: ${{ matrix.os == 'windows' && 'test_urllib2net' || '' }}
         run: |
           set -o pipefail
           just conformance python 2>&1 | tee conformance-output.txt
@@ -460,35 +480,27 @@ jobs:
   # ceilings ("<os>-arm64" in benchmarks/limits.json).
   bench-arm64:
     name: "bench (${{ matrix.os }}-arm64, ${{ matrix.runtime }})"
-    needs: rootfs-arm64
+    needs: [plan, rootfs-arm64]
     concurrency:
-      group: arm64-bench-${{ matrix.runtime }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' }}
+      group: arm64-bench-${{ matrix.runtime }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
-    # The 1ES pool's JobId label must be unique to each job.
     runs-on: >-
-      ${{ matrix.pool && fromJSON(format('["self-hosted", "Windows", "ARM64", "{0}", "JobId=bench-arm64-{1}-{2}-{3}"]',
-      matrix.pool, matrix.runtime, github.run_id, github.run_attempt)) || matrix.runner }}
+      ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('bench-arm64-{0}-{1}-{2}-{3}',
+      matrix.runtime, matrix.os, github.run_id, github.run_attempt))) }}
     permissions:
       contents: write   # push to gh-pages
     # 25 of them for the gate's second measurement (benchmarks/gate.sh).
-    timeout-minutes: ${{ github.event_name == 'schedule' && 265 || 85 }}
+    timeout-minutes: ${{ needs.plan.outputs.scope != 'change' && 265 || 85 }}
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, macos, windows]
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
         runtime: [python, python-shell, agent]
-        include:
-          - os: linux
-            runner: [self-hosted, Linux, arm64, kvm]
-          - os: macos
-            runner: [self-hosted, macos, arm64, hvf]
-          - os: windows
-            pool: 1ES.Pool=hl-windows-arm
-        # agent only on main, and on Linux only nightly (see the top of
+        # agent only in tier 3, and on Linux only on Sundays (see the top of
         # this file).
         exclude:
-          - runtime: ${{ github.event_name == 'pull_request' && 'agent' || '' }}
-          - os: ${{ github.event_name != 'schedule' && 'linux' || '' }}
+          - runtime: ${{ needs.plan.outputs.scope == 'change' && 'agent' || '' }}
+          - os: ${{ needs.plan.outputs.scope != 'weekly' && 'linux' || '' }}
             runtime: agent
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -531,7 +543,8 @@ jobs:
           output-file-path: bench-results.json
           github-token: ${{ secrets.GITHUB_TOKEN }}
           benchmark-data-dir-path: dev/bench/${{ matrix.os }}-arm64/${{ matrix.runtime }}
-          auto-push: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+          # A re-run's would chart the commit twice
+          auto-push: ${{ github.event_name == 'schedule' && github.run_attempt == 1 }}
           summary-always: true
           fail-on-alert: false
           alert-threshold: '200%'
