@@ -219,6 +219,73 @@ pub fn find_snapshot(stamp: &str) -> Result<Option<PathBuf>, String> {
     Ok(stamped.then_some(slot))
 }
 
+/// When the snapshot in `dir` was written, which tells it from one another
+/// run puts in its place.
+pub fn snapshot_written(dir: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(dir.join(STAMP_FILE))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// Move the snapshot written at `part`, under `stamp`, into `slot`.  What is
+/// there already stays, and `part` goes, when it is a snapshot under the
+/// same stamp (so of the same guest) that another run put there: runs may
+/// be restoring from it.  It is replaced when it is anything else: an
+/// incomplete or foreign directory, or the snapshot written at
+/// `unusable`, which this run found would not load.
+pub fn install_snapshot(
+    part: &Path,
+    slot: &Path,
+    stamp: &str,
+    unusable: Option<std::time::SystemTime>,
+) -> Result<(), String> {
+    for _ in 0..2 {
+        if fs::rename(part, slot).is_ok() {
+            return Ok(());
+        }
+        if !slot.is_dir() {
+            break;
+        }
+        let ours = fs::read_to_string(slot.join(STAMP_FILE)).is_ok_and(|s| s == stamp);
+        if ours && (unusable.is_none() || snapshot_written(slot) != unusable) {
+            let _ = fs::remove_dir_all(part);
+            return Ok(());
+        }
+        let _ = fs::remove_dir_all(slot);
+    }
+    let _ = fs::remove_dir_all(part);
+    if fs::read_to_string(slot.join(STAMP_FILE)).is_ok_and(|s| s == stamp) {
+        Ok(())
+    } else {
+        Err(format!(
+            "cannot save the warm snapshot at {}",
+            slot.display()
+        ))
+    }
+}
+
+/// How old a snapshot still being written may be before it is taken for
+/// one a killed run left behind: saving one takes seconds.
+const ABANDONED_PART_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Remove the `.part` directories in `dir` that runs killed while saving a
+/// snapshot left behind.
+pub fn remove_abandoned_parts(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > ABANDONED_PART_AGE));
+        if path.extension().is_some_and(|e| e == "part") && path.is_dir() && old {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
 /// The warm snapshots kept of one guest that differ in their environment
 /// alone (see `prune_superseded`).
 const ENV_VARIANTS_KEPT: usize = 4;
@@ -556,6 +623,88 @@ mod tests {
         let left = |name: &str| dir.path().join(name).exists();
         assert!(left("ours") && left("other-guest") && left("other-rootfs"));
         assert!(!left("rebuilt") && !left("old-hluk"));
+    }
+
+    /// A saved snapshot moves into an empty slot.  One another run placed
+    /// there under the same stamp stays (runs may restore from it) and ours
+    /// goes; anything else there is replaced: a directory without the stamp,
+    /// one under another stamp, and the snapshot this run found would not
+    /// load, but not one a concurrent run already put in its place.
+    #[test]
+    fn install_keeps_only_a_good_snapshot_already_in_the_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let n = std::cell::Cell::new(0);
+        let part = |stamp: Option<&str>, content: &str| {
+            n.set(n.get() + 1);
+            let d = dir.path().join(format!("slot.{}.part", n.get()));
+            std::fs::create_dir(&d).unwrap();
+            std::fs::write(d.join("content"), content).unwrap();
+            if let Some(stamp) = stamp {
+                std::fs::write(d.join(STAMP_FILE), stamp).unwrap();
+            }
+            d
+        };
+        let slot = dir.path().join("slot");
+        let content = || std::fs::read_to_string(slot.join("content")).unwrap();
+
+        install_snapshot(&part(Some("s"), "first"), &slot, "s", None).unwrap();
+        assert_eq!(content(), "first");
+        install_snapshot(&part(Some("s"), "second"), &slot, "s", None).unwrap();
+        assert_eq!(content(), "first", "a concurrent run's snapshot stays");
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "ours goes"
+        );
+
+        // Found unusable here, and already repaired by another run: the
+        // repair stays.  Still the one found unusable: it is replaced.
+        let broken = snapshot_written(&slot);
+        std::fs::remove_dir_all(&slot).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        install_snapshot(&part(Some("s"), "repaired"), &slot, "s", None).unwrap();
+        install_snapshot(&part(Some("s"), "late repair"), &slot, "s", broken).unwrap();
+        assert_eq!(content(), "repaired", "a concurrent repair stays");
+        let found = snapshot_written(&slot);
+        install_snapshot(&part(Some("s"), "fixed"), &slot, "s", found).unwrap();
+        assert_eq!(
+            content(),
+            "fixed",
+            "the snapshot found unusable is replaced"
+        );
+
+        for junk in [None, Some("other")] {
+            std::fs::remove_dir_all(&slot).unwrap();
+            std::fs::rename(part(junk, "junk"), &slot).unwrap();
+            install_snapshot(&part(Some("s"), "saved"), &slot, "s", None).unwrap();
+            assert_eq!(content(), "saved", "a slot holding {junk:?} is replaced");
+        }
+    }
+
+    /// The `.part` directories a killed run left behind go once they are
+    /// old enough that no run is still writing them; snapshots stay.
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_parts_go() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["ab.1.part", "ab.2.part", "ab"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let old = std::time::SystemTime::now() - ABANDONED_PART_AGE * 2;
+        std::fs::File::open(dir.path().join("ab.1.part"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        remove_abandoned_parts(dir.path());
+        assert!(
+            !dir.path().join("ab.1.part").exists(),
+            "an abandoned part goes"
+        );
+        assert!(
+            dir.path().join("ab.2.part").exists(),
+            "one being written stays"
+        );
+        assert!(dir.path().join("ab").exists(), "a snapshot stays");
     }
 
     #[test]

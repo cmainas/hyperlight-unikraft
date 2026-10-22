@@ -48,6 +48,10 @@ RUN set -eu; \
     stage /etc/ld.so.conf /etc/ld.so.conf; \
     stage /etc/ld.so.conf.d /etc/ld.so.conf.d; \
     stage /etc/ld.so.cache /etc/ld.so.cache; \
+    # The users and groups (root among them), so getpass.getuser(),
+    # pwd.getpwuid() and ~ resolve as on Linux
+    stage /etc/passwd /etc/passwd; \
+    stage /etc/group /etc/group; \
     # /tmp needed for guest filesystem writes (ramfs, in-memory)
     mkdir -p /rootfs/tmp; \
     # Hyperlight driver
