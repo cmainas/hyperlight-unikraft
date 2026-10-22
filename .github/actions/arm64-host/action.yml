@@ -13,6 +13,13 @@ inputs:
 runs:
   using: composite
   steps:
+    # The self-hosted Mac and Linux hosts keep their disk between jobs:
+    # show what fills it, and remove what hluk and its tests left there.
+    - name: Disk usage and cleanup
+      if: runner.os != 'Windows'
+      shell: bash
+      run: bash dev/ci-disk.sh
+
     # Self-hosted runners come without a Rust toolchain: install the one
     # rust-toolchain.toml pins, as hyperlight's jobs do.
     - name: Rust toolchain version

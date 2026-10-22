@@ -1,0 +1,74 @@
+name: runner disk
+
+# Sweeps what hluk and this repo's jobs keep on the self-hosted Macs, the
+# only arm64 hosts that keep their disk between jobs (the Linux and
+# Windows ones are fresh machines each time): each runner is a user of
+# its own, with its own hluk cache and build directories, and a Mac's
+# runners share its disk with hyperlight's jobs.  One job per runner, each
+# holding its runner a while so the jobs spread over all of them; the last
+# job lists the runners none reached, to run this again for.  Other repos'
+# files are shown, never removed.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/runner-disk.yml
+      - dev/ci-disk.sh
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  sweep:
+    name: sweep (${{ matrix.slot }})
+    runs-on: [self-hosted, macos, arm64, hvf]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      # Fetched, not checked out: a full disk has no room for a checkout.
+      - name: Sweep
+        # bash -eo pipefail: a failed download fails the job, which then
+        # does not count as a runner swept.
+        shell: bash
+        env:
+          SWEEP: "1"
+          SCRIPT: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.pull_request.head.sha || github.sha }}/dev/ci-disk.sh
+        run: |
+          echo "runner: $RUNNER_NAME ($(whoami))"
+          curl -fsSL --retry 3 "$SCRIPT" | bash
+
+      # Held, so this runner takes no other sweep job and they all spread.
+      - name: Hold the runner
+        run: sleep 300
+
+  coverage:
+    needs: sweep
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUNNERS: >-
+        Simons-Mac-mini-runner-1 Simons-Mac-mini-runner-2
+        Simons-Mac-mini-runner-3 Simons-Mac-mini-runner-4
+        azures-Mac-mini-runner-1 azures-Mac-mini-runner-2
+        azures-Mac-mini-runner-3 azures-Mac-mini-runner-4
+    steps:
+      - name: Runners swept
+        run: |
+          swept=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            --jq '.jobs[] | select(.name | startswith("sweep")) | select(.conclusion == "success") | .runner_name' | sort -u)
+          echo "Swept:"; echo "$swept" | sed 's/^/  /'
+          missed=""
+          for r in $RUNNERS; do
+            echo "$swept" | grep -qx "$r" || missed="$missed $r"
+          done
+          if [ -n "$missed" ]; then
+            echo "::warning::Not swept, run this again:$missed"
+          else
+            echo "Every runner swept."
+          fi
