@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Every hluk upgrade left the warm snapshots of each guest in the cache for good: a snapshot another hluk build saved, which this one refuses, was pruned only once its rootfs was rebuilt. `hluk run` now removes those of the same rootfs when it saves its own.
 - `os.chmod` (and every `chmod`) on a mount failed with `EIO`: the host took the mode as unsigned and the kernel sends it signed, so the host call was refused before it ran. It now reaches the host file, permission bits only: a guest cannot set setuid, setgid or sticky.
 - DNS messages are read only as far as a resolver could be asked: a name longer than 253 characters, a label with a dot or a byte that is not printable ASCII, or an extended label type makes the message no well-formed query (refused) or answer (ignored). The label `a.b` read as the two labels `a` and `b`, and a forged answer could spell out a name kilobytes long through a compression loop.
 - A `sendto` on a connected TCP socket was judged by the address it named, though the data goes to the socket's peer: a guest connected to a resolver on port 53 could send anything there by naming an address the policy allows, past the check of its DNS questions. A `sendto` on a stream socket is a `send` to its peer now, checked as one.

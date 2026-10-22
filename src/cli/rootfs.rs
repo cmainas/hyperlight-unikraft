@@ -223,19 +223,28 @@ pub fn find_snapshot(stamp: &str) -> Result<Option<PathBuf>, String> {
 /// alone (see `prune_superseded`).
 const ENV_VARIANTS_KEPT: usize = 4;
 
-/// Remove the snapshots taken from an earlier version of `stamp`'s rootfs
-/// file (same path, different size or mtime: it was rebuilt), other than
-/// `keep`.  Snapshots of the same file under other settings (memory,
-/// entry, `warm_exec`) are other guests and stay; of those that differ in
-/// their environment alone, the newest [`ENV_VARIANTS_KEPT`] do.  Returns
-/// how many went.
+/// Remove the snapshots of `stamp`'s rootfs that no run can restore any
+/// more, other than `keep`: those of an earlier version of the file (same
+/// path, different size or mtime: it was rebuilt), and those another hluk
+/// build saved (another `key`: its kernel or host functions, which this
+/// build refuses).  Without the second, every hluk upgrade left a
+/// snapshot of each guest behind for good.  Snapshots of the same file
+/// under other settings (memory, entry, `warm_exec`) are other guests and
+/// stay; of those that differ in their environment alone, the newest
+/// [`ENV_VARIANTS_KEPT`] do.  Returns how many went.
 pub fn prune_superseded(stamp: &str, keep: &Path) -> Result<usize, String> {
+    prune_among(list_snapshots()?, stamp, keep)
+}
+
+/// [`prune_superseded`] over `snapshots`.
+fn prune_among(snapshots: Vec<SnapshotEntry>, stamp: &str, keep: &Path) -> Result<usize, String> {
     let Some(rootfs) = stamp_field(stamp, "rootfs") else {
         return Ok(0);
     };
-    let same_file = |other: &str| {
-        stamp_field(other, "size") == stamp_field(stamp, "size")
-            && stamp_field(other, "mtime") == stamp_field(stamp, "mtime")
+    let restorable = |other: &str| {
+        ["key", "size", "mtime"]
+            .iter()
+            .all(|k| stamp_field(other, k) == stamp_field(stamp, k))
     };
     // Snapshots keyed by an environment (see `stamp`) differ in it alone:
     // keep the newest few, so runs alternating between a few values all
@@ -245,11 +254,11 @@ pub fn prune_superseded(stamp: &str, keep: &Path) -> Result<usize, String> {
     }
     let mut pruned = 0;
     let mut variants = Vec::new();
-    for entry in list_snapshots()? {
+    for entry in snapshots {
         if entry.dir == keep || stamp_field(&entry.stamp, "rootfs") != Some(rootfs) {
             continue;
         }
-        if !same_file(&entry.stamp) {
+        if !restorable(&entry.stamp) {
             fs::remove_dir_all(&entry.dir)
                 .map_err(|e| format!("cannot remove {}: {e}", entry.dir.display()))?;
             pruned += 1;
@@ -513,6 +522,41 @@ fn docker_error(e: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Snapshots no run can restore go: a rebuilt rootfs's, and another
+    /// hluk build's; another guest of the same file, and another rootfs's,
+    /// stay.
+    #[test]
+    fn prune_drops_what_cannot_be_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let stamp = |key: &str, rootfs: &str, mtime: u32, scratch: u32| {
+            format!(
+                "key={key}\nrootfs={rootfs}\nsize=1\nmtime={mtime}\nscratch_mb={scratch}\nentry=\nwarm_exec=\"\"\n"
+            )
+        };
+        let entry = |name: &str, stamp: String| {
+            let d = dir.path().join(name);
+            std::fs::create_dir(&d).unwrap();
+            SnapshotEntry {
+                dir: d,
+                stamp,
+                bytes: 0,
+            }
+        };
+        let ours = stamp("k1", "/r.cpio", 2, 256);
+        let snapshots = vec![
+            entry("ours", ours.clone()),
+            entry("rebuilt", stamp("k1", "/r.cpio", 1, 256)),
+            entry("old-hluk", stamp("k0", "/r.cpio", 2, 256)),
+            entry("other-guest", stamp("k1", "/r.cpio", 2, 512)),
+            entry("other-rootfs", stamp("k0", "/s.cpio", 2, 256)),
+        ];
+        let keep = dir.path().join("ours");
+        assert_eq!(prune_among(snapshots, &ours, &keep), Ok(2));
+        let left = |name: &str| dir.path().join(name).exists();
+        assert!(left("ours") && left("other-guest") && left("other-rootfs"));
+        assert!(!left("rebuilt") && !left("old-hluk"));
+    }
 
     #[test]
     fn a_stamp_describes_itself() {
