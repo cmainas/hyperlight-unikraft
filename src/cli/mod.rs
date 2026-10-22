@@ -178,9 +178,11 @@ pub struct RunArgs {
 
     /// Ports the guest may bind to for inbound connections: a port, a
     /// range LOW-HIGH, or `all` (repeatable); replaces a project's ports.
-    /// Without this flag or a project's ports, bind() is rejected
-    /// (outbound-only). Without --net, --net-allow, --net-block or a
-    /// project's policy, the guest serves on them but may connect nowhere.
+    /// Without this flag or a project's ports, bind() is rejected but for
+    /// port 0: the guest may serve only on a port the host picks, and may
+    /// not choose its source port either. Without --net, --net-allow,
+    /// --net-block or a project's policy, the guest serves on them but may
+    /// connect nowhere.
     #[arg(long = "port", value_name = "PORT|LOW-HIGH|all")]
     ports: Vec<PortSpec>,
 
@@ -962,7 +964,16 @@ pub fn run(args: RunArgs) -> CliResult<()> {
         }
     };
     let mut restored = false;
+    // A cached snapshot of this guest that would not load, by when it was
+    // written: the one this run saves replaces it, unless another run has
+    // replaced it first.
+    let mut unusable = None;
     let mut builder = None;
+    if warm_key.is_some() {
+        // Here, and not only when saving, so that a cache only ever
+        // restored from loses what killed runs left too.
+        rootfs::remove_abandoned_parts(&rootfs::snapshots_dir()?);
+    }
     if let Some(key) = &warm_key
         && let Some(dir) = rootfs::find_snapshot(key)?
     {
@@ -971,7 +982,10 @@ pub fn run(args: RunArgs) -> CliResult<()> {
                 builder = Some(b);
                 restored = true;
             }
-            Err(e) => info!(error = %e, "cached warm snapshot cannot be used; booting fresh"),
+            Err(e) => {
+                info!(error = %e, "cached warm snapshot cannot be used; booting fresh");
+                unusable = rootfs::snapshot_written(&dir);
+            }
         }
     }
     let mut builder = match builder {
@@ -1043,10 +1057,12 @@ pub fn run(args: RunArgs) -> CliResult<()> {
             crate::kernel_tail::workload(sandbox.run(code.as_str()))?;
             info!(elapsed_ms = elapsed_ms(t), "warm_exec done");
         }
-        // Written beside its slot and moved in whole, so a run that dies
-        // half way leaves no snapshot that looks complete.
+        // Written beside its slot under this process's own name and moved
+        // in whole: concurrent first runs of one guest each write their
+        // own, and a run that dies half way leaves no snapshot that looks
+        // complete.
         let slot = rootfs::snapshot_slot(&key)?;
-        let part = slot.with_extension("part");
+        let part = slot.with_extension(format!("{}.part", std::process::id()));
         let _ = fs::remove_dir_all(&part);
         if let Some(parent) = slot.parent() {
             fs::create_dir_all(parent)?;
@@ -1054,19 +1070,7 @@ pub fn run(args: RunArgs) -> CliResult<()> {
         match sandbox.snapshot_to(&part) {
             Ok(_) => {
                 fs::write(part.join(rootfs::STAMP_FILE), &key)?;
-                // Remove any earlier snapshot and move ours in.  If a
-                // concurrent `hluk run` placed an equivalent one between
-                // our remove and rename, the rename fails; that snapshot
-                // is the same (same stamp hash), so ours is redundant.
-                let _ = fs::remove_dir_all(&slot);
-                if fs::rename(&part, &slot).is_err() {
-                    if slot.is_dir() {
-                        // Another run saved an equivalent snapshot first.
-                        let _ = fs::remove_dir_all(&part);
-                    } else {
-                        fs::rename(&part, &slot)?;
-                    }
-                }
+                rootfs::install_snapshot(&part, &slot, &key, unusable)?;
                 let pruned = rootfs::prune_superseded(&key, &slot)?;
                 info!(
                     elapsed_ms = elapsed_ms(t),

@@ -639,8 +639,10 @@ fn resolves_to_now(names: &[String], ip: &IpAddr) -> Option<bool> {
 /// Controls which ports a guest may bind to for inbound connections.
 ///
 /// Orthogonal to [`NetworkPolicy`] (which governs *outbound* destinations).
-/// Without a `ListenPorts` allowlist, `net_bind` rejects every call
-/// (outbound-only mode).  Single ports, ranges and "every port" compose:
+/// Without a `ListenPorts` allowlist, `net_bind` rejects every call but
+/// an ephemeral one (port 0), a bind that only picks a source port
+/// included: the guest can serve only on a port the host picks.  Single
+/// ports, ranges and "every port" compose:
 /// [`ListenPorts::all`] is for an embedder whose own boundary, such as a
 /// container's network namespace, already scopes what the guest exposes.
 #[derive(Clone, Debug)]

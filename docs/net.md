@@ -163,7 +163,7 @@ let mut guest = SandboxBuilder::from_initrd(rootfs)
 
 Listen ports need no outbound policy: without `.network(...)`, the guest may serve on them and reach nothing, as under an allow list that lists nothing — what a TCP server that only answers requests needs (its replies go over the accepted connections).  A UDP service cannot answer so: each reply is a `sendto()` to the client, an outbound destination like any other, so it needs a policy that allows its clients.
 
-Ephemeral binds (port 0 — "assign any port") are always allowed.  `ListenPorts::all()` permits every port, and `with_range(8000..=8010)` a range; on the command line these are `--port all` and `--port 8000-8010`, next to `--port 80`.  `all` is for an embedder whose own boundary already scopes what the guest exposes, such as a container runtime, where the guest binds inside the container's network namespace the way any container process does.
+Without `ListenPorts`, every bind but an ephemeral one is refused with `EACCES`, a bind that only picks a source port for an outbound connection (`source_address`, `Dialer.LocalAddr`) included: a guest given a policy and no ports can serve only on a port the host picks.  Ephemeral binds (port 0 — "assign any port") are always allowed.  `ListenPorts::all()` permits every port, and `with_range(8000..=8010)` a range; on the command line these are `--port all` and `--port 8000-8010`, next to `--port 80`.  `all` is for an embedder whose own boundary already scopes what the guest exposes, such as a container runtime, where the guest binds inside the container's network namespace the way any container process does.
 
 ### Resolver configuration
 
@@ -183,7 +183,7 @@ hluk run --net-allow example.com --net-allow 10.0.0.5 ...
 # BlockList — block these hosts (implies --net):
 hluk run --net-block evil.com --net-block 1.2.3.4 ...
 
-# Restrict inbound listen ports:
+# Let the guest serve on ports 80 and 443:
 hluk run --net --port 80 --port 443 ...
 
 # Serve on a port, reach nothing:

@@ -470,11 +470,18 @@ impl Net {
         }
     }
 
-    /// Inbound policy (bind).  Ephemeral binds (port 0) are always allowed.
+    /// Inbound policy (bind).  Ephemeral binds (port 0) are always
+    /// allowed; any other port must be listed, whether the guest means to
+    /// listen on it or to connect from it, so a guest given no ports can
+    /// serve only on a port the host picks, as `--port` and
+    /// `SandboxBuilder::listen_ports` promise.
     fn allow_bind(&self, addr: &SocketAddr) -> Res<()> {
+        if addr.port() == 0 {
+            return Ok(());
+        }
         match &self.listen_ports {
-            Some(lp) if addr.port() != 0 && !lp.allows(addr.port()) => Err(errno::EACCES),
-            _ => Ok(()),
+            Some(lp) if lp.allows(addr.port()) => Ok(()),
+            _ => Err(errno::EACCES),
         }
     }
 
@@ -1647,12 +1654,15 @@ mod tests {
     /// disconnect, as on Linux (macOS replaces the host socket for both).
     #[test]
     fn datagram_rebind_keeps_bound_port() {
-        let net = open_net();
         let port = std::net::UdpSocket::bind(loopback(0))
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
+        let net = Net::new(
+            NetworkPolicy::AllowAll,
+            Some(ListenPorts::from_ports([port])),
+        );
         let s = udp(&net);
         net.setsockopt(s, SOL_SOCKET, SO_REUSEADDR, 1).unwrap();
         net.bind(s, loopback(port)).unwrap();
@@ -1838,6 +1848,19 @@ mod tests {
             Some(ListenPorts::from_ports([8080])),
         );
         let s = tcp(&net);
+        assert_eq!(net.bind(s, loopback(19_999)), Err(errno::EACCES));
+        // Ephemeral binds are always allowed.
+        net.bind(s, loopback(0)).unwrap();
+    }
+
+    /// Without listen ports every bind but an ephemeral one is refused,
+    /// under a policy that allows everything: the guest can serve only on
+    /// a port the host picks.
+    #[test]
+    fn no_listen_ports_rejects_every_bind() {
+        let net = Net::new(NetworkPolicy::AllowAll, None);
+        let s = tcp(&net);
+        assert_eq!(net.bind(s, loopback(8080)), Err(errno::EACCES));
         assert_eq!(net.bind(s, loopback(19_999)), Err(errno::EACCES));
         // Ephemeral binds are always allowed.
         net.bind(s, loopback(0)).unwrap();
