@@ -24,7 +24,7 @@ FAKE_HLUK = f"""#!{sys.executable}
 import json, os, sys, time
 args = sys.argv[1:]
 if args == ["--version"]:
-    print(os.environ.get("FAKE_HLUK_VERSION", "hluk 0.18.0"))
+    print(os.environ.get("FAKE_HLUK_VERSION", "hluk 0.19.0"))
     sys.exit(0)
 entry = {{"args": args, "pid": os.getpid()}}
 if "--mount" in args:
@@ -253,10 +253,11 @@ def test_hluk_dies_with_its_worker(fake_hluk, monkeypatch, tmp_path):
     raise AssertionError("hluk outlived its worker")
 
 
-def test_old_hluk_is_refused(fake_hluk, monkeypatch):
-    monkeypatch.setenv("FAKE_HLUK_VERSION", "hluk 0.17.2")
+@pytest.mark.parametrize("version", ["hluk 0.18.0", "hluk 0.18.0+dev.44ee170", "hluk 0.19.0-rc1", ""])
+def test_old_hluk_is_refused(fake_hluk, monkeypatch, version):
+    monkeypatch.setenv("FAKE_HLUK_VERSION", version)
     response, _ = run_case("hyperlight://", "pass", None, 5, 256)
-    assert response["status"] == "SandboxError" and "0.18.0" in response["message"]
+    assert response["status"] == "SandboxError" and "needs hluk 0.19.0 or later" in response["message"]
     assert fake_hluk() == []
 
 
@@ -352,6 +353,13 @@ def test_image_names(fake_hluk, url, runtime):
     assert args[args.index("--runtime") + 1] == runtime
 
 
+@pytest.mark.parametrize("version", ["hluk 0.19.0", "hluk 0.19.0+dev.1234567", "hluk 0.20.0-rc1", "hluk 1.0.0"])
+def test_recent_hluk_is_accepted(fake_hluk, monkeypatch, version):
+    monkeypatch.setenv("FAKE_HLUK_VERSION", version)
+    response, _ = run_case("hyperlight://", "pass", None, 5, 256)
+    assert response["status"] == "Success"
+
+
 def test_a_trailing_slash_on_a_rootfs_path_is_dropped(fake_hluk):
     run_case("hyperlight:///images/my-rootfs.cpio/", "pass", None, 5, 256)
     args = fake_hluk()[0]["args"]
@@ -360,7 +368,7 @@ def test_a_trailing_slash_on_a_rootfs_path_is_dropped(fake_hluk):
 
 def test_limits_below_what_the_image_runs_in_are_refused(fake_hluk, tmp_path):
     # The guest kernel does not enforce a process's own limit, so such a limit would not hold
-    for url in ("hyperlight://agent", "hyperlight://ghcr.io/hyperlight-dev/hyperlight-unikraft/agent:initrd-v0.18.0"):
+    for url in ("hyperlight://agent", "hyperlight://ghcr.io/hyperlight-dev/hyperlight-unikraft/agent:initrd-v0.19.0"):
         response, error = run_case(url, "pass", None, 5, 256)
         assert response is None and "use at least 720" in error
     rootfs = tmp_path / "big.cpio"

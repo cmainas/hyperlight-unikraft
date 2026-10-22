@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 URL_SCHEME = "hyperlight://"
 DEFAULT_RUNTIME = "python"
 
-# Older consoles cut lines longer than 4 KiB, which would fail correct answers.
-MIN_HLUK_VERSION = (0, 18, 0)
+# Earlier releases removed a guest's warm snapshot while saving it again, failing the runs restoring it.
+MIN_HLUK_VERSION = (0, 19, 0)
 
 # Output kept per stream; the rest is read and dropped so a flood cannot exhaust the worker.
 MAX_OUTPUT_BYTES = 16 << 20
@@ -409,8 +409,10 @@ def _prepare_once(hluk: str, runtime: str, memory_limit_mb: Optional[int], lock_
         out = subprocess.run([hluk, "--version"], capture_output=True, text=True, timeout=60).stdout
     except (OSError, subprocess.TimeoutExpired) as e:
         return f"Hyperlight backend: cannot run {hluk}: {e}"
-    match = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
-    if not match or tuple(map(int, match.groups())) < MIN_HLUK_VERSION:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)(-\S+)?", out)
+    release = tuple(map(int, match.groups()[:3])) if match else None
+    # A pre-release (`0.19.0-rc1`) comes before its release; build metadata (`+dev.1234567`) does not.
+    if release is None or release < MIN_HLUK_VERSION or (release == MIN_HLUK_VERSION and match.group(4)):
         minimum = ".".join(map(str, MIN_HLUK_VERSION))
         return f"Hyperlight backend: needs hluk {minimum} or later, {hluk} reports {out.strip()!r}"
     # One deadline for waiting on the lock and running the guest together.

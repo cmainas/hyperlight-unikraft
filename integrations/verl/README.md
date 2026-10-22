@@ -13,7 +13,7 @@ Each test case runs in its own micro-VM, restored from a warm snapshot of a boot
 
 ## Install
 
-Linux only, as verl, on a host with KVM; the user running training needs access to `/dev/kvm`. Install `hluk` v0.18.0 or later:
+Linux only, as verl, on a host with KVM; the user running training needs access to `/dev/kvm`. Install `hluk` v0.19.0 or later:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/hyperlight-dev/hyperlight-unikraft/main/install.sh | sh
