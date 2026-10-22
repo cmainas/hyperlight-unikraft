@@ -1,6 +1,6 @@
 name: arm64 host
 description: >-
-  Ready a self-hosted arm64 runner for arm64.yml's jobs: the pinned Rust
+  Ready a self-hosted arm64 runner for arm64-jobs.yml's jobs: the pinned Rust
   toolchain, Visual Studio's clang on Windows, and the guest images and test
   binaries the rootfs-arm64 job built; and Python, when asked for.
 

@@ -950,7 +950,7 @@ jobs:
                   "completed success") echo "arm64 run passed: $url"; exit 0 ;;
                   "completed action_required") echo "Waiting for the arm64 run's approval: $url" ;;
                   "completed startup_failure")
-                    echo "::error::arm64.yml did not start, $url: fix the workflow file."
+                    echo "::error::arm64.yml did not start, $url: fix it or arm64-jobs.yml."
                     exit 1 ;;
                   completed*)
                     echo "::error::arm64 run: $conclusion, $url. Re-run it, $rerun."

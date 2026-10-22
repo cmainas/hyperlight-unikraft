@@ -117,7 +117,7 @@ jobs:
             # A workflow file GitHub refused: no job ran, and none would again
             if [ "$conclusion" = startup_failure ]; then
               report "arm64 nightly: the workflow does not start" "<!-- arm64-report run=$run attempt=$attempt -->" \
-                "The nightly arm64 run did not start: $url (commit $sha). GitHub refused arm64.yml or an action it uses." ||
+                "The nightly arm64 run did not start: $url (commit $sha). GitHub refused arm64.yml, arm64-jobs.yml or an action they use." ||
                 { echo "::warning::Could not report $url"; status=1; }
               continue
             fi
