@@ -363,8 +363,9 @@ jobs:
         run: just demos ${{ matrix.demo }}
 
   # ── Integrations ───────────────────────────────────────────
-  # The Python packages in integrations/, smolagents-hyperlight (smolagents)
-  # and mcp-server-hyperlight (mcp), with this commit's hluk and agent image,
+  # The Python packages in integrations/, smolagents-hyperlight (smolagents),
+  # mcp-server-hyperlight (mcp) and verl-hyperlight (verl, on Linux), with
+  # this commit's hluk and agent image (verl-hyperlight's python image),
   # their micro-VM tests included, against the oldest release of the library
   # each builds on and the newest. The MCP server runs its guest through
   # this commit's smolagents-hyperlight.
@@ -380,9 +381,13 @@ jobs:
       matrix:
         # By their directories under integrations/, rather than their PyPI
         # names, as every step runs in one
-        package: [smolagents, mcp]
+        package: [smolagents, mcp, verl]
         os: [linux, windows]
         deps: [oldest, newest]
+        # verl runs on Linux only
+        exclude:
+          - package: verl
+            os: windows
         include:
           - os: linux
             runner: ubuntu-latest
@@ -394,6 +399,8 @@ jobs:
             floors: smolagents
           - package: mcp
             floors: mcp smolagents-hyperlight smolagents anyio pydantic rich
+          - package: verl
+            floors: filelock
           # This commit's smolagents-hyperlight, which the MCP server runs its
           # guest through; the oldest leg has the release it allows from PyPI
           - package: mcp
@@ -466,6 +473,19 @@ jobs:
             echo "$library $(python -m pip show "$library" | sed -n 's/^Version: //p')"
           done
 
+      # verl itself, for verl-hyperlight's tests in a real verl (tests/test_with_verl.py): a release,
+      # pinned so that a new one, which may import more, fails no commit that did not change (bump it
+      # on purpose), with what importing it and scoring through its Sandbox Fusion code need and a
+      # CPU torch, rather than its own dependencies, the GPU training stack
+      - name: Install verl
+        if: matrix.package == 'verl' && matrix.deps == 'newest'
+        run: |
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.1
+          python -m pip install --no-deps verl==0.9.1
+          python -m pip install packaging==26.3 numpy==2.5.4 ray==2.59.0 tensordict==0.15.2 omegaconf==2.4.0 \
+            transformers==5.20.2
+          python -c "import verl.utils.reward_score.sandbox_fusion; import verl; print('verl', verl.__version__)"
+
       - name: Lint
         if: matrix.os == 'linux' && matrix.deps == 'newest'
         working-directory: integrations/${{ matrix.package }}
@@ -496,7 +516,8 @@ jobs:
         env:
           RUN_ALL: "1"
           HLUK_PATH: ${{ github.workspace }}/target/release/hluk${{ runner.os == 'Windows' && '.exe' || '' }}
-          HLUK_INITRD: ${{ github.workspace }}/build-elfloader/agent-rootfs.cpio
+          # verl-hyperlight's tests run the python image; the others' the agent image, at the memory it needs
+          HLUK_INITRD: ${{ github.workspace }}/build-elfloader/${{ matrix.package == 'verl' && 'python' || 'agent' }}-rootfs.cpio
           HLUK_SCRATCH_MB: "1536"
         run: python -m pytest -v
 

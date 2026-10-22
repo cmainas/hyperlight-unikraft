@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "verl-hyperlight"
+version = "0.1.0"
+description = "Run verl's code-reward test cases in local Hyperlight micro-VMs"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "The Hyperlight Authors" }]
+requires-python = ">=3.10"
+keywords = ["verl", "reinforcement-learning", "hyperlight", "unikraft", "sandbox", "micro-vm", "reward"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Security",
+]
+# verl itself is not a dependency: the runner takes its arguments and returns plain dicts, and the plugin imports it
+# only where verl already runs. filelock serializes the first run of a guest across a node's reward workers.
+dependencies = ["filelock>=3.12,<5"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "ruff>=0.17,<0.18"]
+
+# Makes reward.sandbox_fusion.url=hyperlight:// run each test case here: verl imports its plugins at its own import,
+# and this one registers run_code as the hyperlight scheme's sandbox runner (or, in a verl without sandbox runners,
+# routes hyperlight:// URLs to it)
+[project.entry-points."verl.plugins"]
+hyperlight = "verl_hyperlight.plugin"
+
+[project.urls]
+Homepage = "https://github.com/hyperlight-dev/hyperlight-unikraft/tree/main/integrations/verl"
+Repository = "https://github.com/hyperlight-dev/hyperlight-unikraft"
+Issues = "https://github.com/hyperlight-dev/hyperlight-unikraft/issues"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE"]
+# Hatchling adds the repository's .gitignore otherwise
+exclude = [".gitignore"]
+
+[tool.ruff]
+line-length = 119
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+known-first-party = ["verl_hyperlight"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

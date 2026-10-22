@@ -1,9 +1,10 @@
 # Publish one of the Python packages in integrations/ to PyPI:
-# `smolagents-hyperlight` (integrations/smolagents) or `mcp-server-hyperlight`
-# (integrations/mcp), which is then listed in the MCP Registry, and give the
-# version a GitHub release. Manual; a dry run unless `dry_run` is set to
-# false, and only from main. The version is the one in the package's
-# pyproject.toml, released on its own schedule rather than with hluk's.
+# `smolagents-hyperlight` (integrations/smolagents), `verl-hyperlight`
+# (integrations/verl) or `mcp-server-hyperlight` (integrations/mcp), the last
+# also listed in the MCP Registry, and give the version a GitHub release.
+# Manual; a dry run unless `dry_run` is set to false, and only from main. The
+# version is the one in the package's pyproject.toml, released on its own
+# schedule rather than with hluk's.
 name: Publish to PyPI
 
 on:
@@ -15,6 +16,7 @@ on:
         options:
           - smolagents-hyperlight
           - mcp-server-hyperlight
+          - verl-hyperlight
         default: smolagents-hyperlight
       dry_run:
         description: "Build and check without publishing"
@@ -37,7 +39,7 @@ env:
   # by a shorter name
   # A choice named here only: an unknown one names no directory, and the build
   # fails rather than publish another package's
-  PACKAGE_DIR: integrations/${{ inputs.package == 'mcp-server-hyperlight' && 'mcp' || inputs.package == 'smolagents-hyperlight' && 'smolagents' || 'unknown' }}
+  PACKAGE_DIR: integrations/${{ inputs.package == 'mcp-server-hyperlight' && 'mcp' || inputs.package == 'smolagents-hyperlight' && 'smolagents' || inputs.package == 'verl-hyperlight' && 'verl' || 'unknown' }}
   # Bumped by hand: Dependabot does not read these
   MCP_PUBLISHER_URL: https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
   MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
@@ -291,7 +293,7 @@ jobs:
   github-release:
     needs: [build, publish, mcp-registry]
     # Last, so that a release, which a re-run takes as done, means the registry lists the version too; with
-    # smolagents-hyperlight, which the registry job skips, after the upload alone
+    # the packages the registry job skips (all but mcp-server-hyperlight), after the upload alone
     if: ${{ !cancelled() && needs.publish.result == 'success' && contains(fromJSON('["success", "skipped"]'), needs.mcp-registry.result) }}
     runs-on: ubuntu-latest
     permissions:
