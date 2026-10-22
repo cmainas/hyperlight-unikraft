@@ -28,6 +28,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Concurrent first runs of one guest (a pool of workers on a fresh cache, say) failed: each saved its warm snapshot into the same `<slot>.part` directory, removing the others' half-written one (`atomic write: failed to create tmp`), and removed the slot before moving its own in, under runs restoring from it. Each run now writes its own part and moves it in only when the slot is empty, or held a snapshot that would not load; parts a killed run left behind go after an hour. 16 concurrent first runs all succeed, leaving one snapshot.
+- The python image had no `/etc/passwd` or `/etc/group`, so `getpass.getuser()` raised `KeyError`, and `pwd` lookups, and `~` with no `HOME`, failed. It ships the base image's.
+- `link()` crashed the guest kernel on its error paths (vfscore's dentry refcount assertion): linking a directory, into a missing directory, or across file systems (from `/tmp` to `/dev`). It fails with `EPERM`, `ENOENT` and `EXDEV`, as on Linux.
 - Every hluk upgrade left the warm snapshots of each guest in the cache for good: a snapshot another hluk build saved, which this one refuses, was pruned only once its rootfs was rebuilt. `hluk run` now removes those of the same rootfs when it saves its own.
 - CI's benchmark jobs, x86 and arm64, failed when another job's load on a shared runner put one run over a ceiling in `benchmarks/limits.json`. They now measure such a timing again, and fail only if the second run is over too.
 - `os.chmod` (and every `chmod`) on a mount failed with `EIO`: the host took the mode as unsigned and the kernel sends it signed, so the host call was refused before it ran. It now reaches the host file, permission bits only: a guest cannot set setuid, setgid or sticky.
