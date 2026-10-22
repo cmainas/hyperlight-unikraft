@@ -733,7 +733,7 @@ class HyperlightExecutor(RemotePythonExecutor):
         initrd (`str`, *optional*): Path to a custom rootfs CPIO to run instead of a published runtime.
         scratch_mb (`int`, *optional*): Guest memory in MiB. Defaults to the size the runtime image is tested with.
         net_allow (`list[str]`, *optional*): Hosts or IPs the guest may connect to. Defaults to none: every connection
-            is refused, and the guest cannot listen on any port.
+            is refused. Either way the guest cannot listen on a port of its own; `hluk_args=["--port", ...]` opens one.
         hluk_args (`list[str]`, *optional*): Additional arguments to pass to `hluk run`, e.g. `["--mount", "/data:/data:ro"]`.
         startup_timeout (`float`, default `300.0`): Seconds to wait for the guest to be ready. The first run pulls the
             runtime image and saves its warm snapshot, which can take a while; later runs start in milliseconds.

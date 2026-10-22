@@ -1460,10 +1460,12 @@ conformance runtime *modules:
     if [ ! -d "$snap_dir" ]; then
         echo "==> Saving conformance snapshot..."
         mkdir -p "$(dirname "$snap_dir")"
+        # Every port: CPython's own tests bind source ports and listeners
+        # as they please, and the test host is the boundary here.
         "$hluk" snapshot save \
             --initrd "$rootfs" \
             --scratch-mb "$scratch" \
-            --net \
+            --net --port all \
             --output "$snap_dir"
     fi
 
@@ -1476,7 +1478,7 @@ conformance runtime *modules:
         # One module per line to avoid output truncation; read in a loop,
         # not by mapfile, which macOS's bash 3.2 lacks.
         test_modules=()
-        while IFS= read -r mod; do test_modules+=("$mod"); done < <("$hluk" snapshot run "$snap_dir" --net --exec \
+        while IFS= read -r mod; do test_modules+=("$mod"); done < <("$hluk" snapshot run "$snap_dir" --net --port all --exec \
             "import os; d='/usr/local/lib/python3.12/test'; [print(f[:-3]) for f in sorted(os.listdir(d)) if f.startswith('test_') and f.endswith('.py')]" \
             2>/dev/null | grep "^test_" || true)
     fi
@@ -1526,7 +1528,7 @@ conformance runtime *modules:
         inline=$(printf "MODULE='%s'\n%s" "$mod" "$(cat '{{conformance_dir}}/{{runtime}}/run_tests.py')")
 
         output=$(limited "$hluk" snapshot run "$snap_dir" \
-            --net --exec "$inline" 2>/dev/null || echo "RESULT $mod status=CRASH tests=0 fail=0 error=0 skip=0 time=0")
+            --net --port all --exec "$inline" 2>/dev/null || echo "RESULT $mod status=CRASH tests=0 fail=0 error=0 skip=0 time=0")
 
         # Extract the RESULT line
         result_line=$(echo "$output" | grep "^RESULT " | tail -1)
@@ -1579,7 +1581,9 @@ conformance runtime *modules:
     if (-not (Test-Path $snapDir)) {
         Write-Output "==> Saving conformance snapshot..."
         New-Item -ItemType Directory -Force (Split-Path $snapDir) | Out-Null
-        & $hluk snapshot save --initrd $rootfs --scratch-mb $scratch --net --output $snapDir
+        # Every port: CPython's own tests bind source ports and listeners
+        # as they please, and the test host is the boundary here.
+        & $hluk snapshot save --initrd $rootfs --scratch-mb $scratch --net --port all --output $snapDir
         if ($LASTEXITCODE -ne 0) { Write-Error "snapshot save failed" }
     }
 
@@ -1590,7 +1594,7 @@ conformance runtime *modules:
     } else {
         Write-Output "==> Discovering test modules..."
         $discover = "import os; d='/usr/local/lib/python3.12/test'; [print(f[:-3]) for f in sorted(os.listdir(d)) if f.startswith('test_') and f.endswith('.py')]"
-        $testModules = @(& $hluk snapshot run $snapDir --net --exec $discover 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ -like 'test_*' })
+        $testModules = @(& $hluk snapshot run $snapDir --net --port all --exec $discover 2>$null | ForEach-Object { $_.Trim() } | Where-Object { $_ -like 'test_*' })
         if ($LASTEXITCODE -ne 0) { Write-Error "module discovery failed (exit $LASTEXITCODE)" }
     }
     if ($testModules.Count -eq 0) { Write-Error "no test modules discovered" }
@@ -1613,7 +1617,7 @@ conformance runtime *modules:
         # Each module runs in its own guest, killed after 60 s (some spin the hypervisor).
         $line = "RESULT $mod status=CRASH tests=0 fail=0 error=0 skip=0 time=0"
         $psi = [System.Diagnostics.ProcessStartInfo]::new($hluk)
-        foreach ($a in @('snapshot', 'run', $snapDir, '--net', '--exec', "MODULE='$mod'`n$runner")) { $psi.ArgumentList.Add($a) }
+        foreach ($a in @('snapshot', 'run', $snapDir, '--net', '--port', 'all', '--exec', "MODULE='$mod'`n$runner")) { $psi.ArgumentList.Add($a) }
         $psi.UseShellExecute = $false
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
