@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = { version = "0.62", default-features = false, features = ["macros", "realloc", "async"] }
+wit-bindgen = { version = "0.63", default-features = false, features = ["macros", "realloc", "async"] }
 wasip3 = "0.9"
 
 [workspace]
