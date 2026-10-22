@@ -34,7 +34,7 @@ To request it, a maintainer labels the pull request `ci/arm64`. A pull request w
 
 `arm64.yml` again, at 03:17 UTC on `main`, on all three arm64 hosts. It is the only scheduled run on the self-hosted Linux arm64 host (tier 1's hosted arm64 runners boot no guest), a small VM under nested virtualization, where a guest's first touch of each page is slow. There the tests run with small guests, and Sunday's run adds the slow suites (agent, Java, node, .NET JIT, PowerShell) and the agent benchmarks, which take hours. The benchmarks of each nightly run are charted on the [benchmark pages](https://hyperlight-dev.github.io/hyperlight-unikraft).
 
-A push to `main` starts no arm64 run: the next nightly tests it. To run it on a branch, start `arm64` by hand (Actions, Run workflow); `weekly` adds Sunday's suites.
+A push to `main` runs no arm64 test, as the next nightly run does. The push's arm64 run only refreshes the guest images' cache, on a hosted runner, so that the pull requests after it need not build them. To run it on a branch, start `arm64` by hand (Actions, Run workflow); `weekly` adds Sunday's suites.
 
 [`arm64-report.yml`](../.github/workflows/arm64-report.yml) handles a failed nightly run:
 

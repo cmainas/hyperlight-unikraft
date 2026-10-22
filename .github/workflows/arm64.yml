@@ -23,8 +23,10 @@ name: arm64
 #   the Mac), so they run on Sundays' run only.  arm64-report.yml re-runs a
 #   failed nightly once, then files what still fails as issues.
 #
-# Pushes to main start no run: the next nightly tests them.  Started by
-# hand, it is a nightly run of the branch; `weekly` adds Sunday's suites.
+# A push to main tests nothing, as the next nightly run does.  Its run only
+# refreshes the guest images' cache, on a hosted runner, so that the pull
+# requests after it need not build them.  Started by hand, it is a nightly
+# run of the branch; `weekly` adds Sunday's suites.
 on:
   workflow_dispatch:
     inputs:
@@ -34,6 +36,8 @@ on:
         default: false
   schedule:
     - cron: "17 3 * * *"
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled]

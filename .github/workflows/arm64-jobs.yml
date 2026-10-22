@@ -23,8 +23,9 @@ jobs:
   # What this run tests, for the other jobs, which a matrix can learn only
   # from another job's outputs:
   # - scope: change (tier 2), nightly or weekly (tier 3; weekly is Sunday's
-  #   nightly, or one started by hand with `weekly`);
-  # - hosts: the hosts' names, Linux in tier 3 only;
+  #   nightly, or one started by hand with `weekly`), or cache (a push to
+  #   main: the guest images' cache alone, for the next pull requests);
+  # - hosts: the hosts' names, Linux in tier 3 only, none for cache;
   # - linux, macos, windows: each host's runner labels, as a JSON array for
   #   format() to fill the 1ES pool's JobId label in, which must be unique
   #   to each job.
@@ -53,6 +54,8 @@ jobs:
         run: |
           if [ "$EVENT" = pull_request ]; then
             scope=change
+          elif [ "$EVENT" = push ]; then
+            scope=cache
           elif [ "$WEEKLY" = true ]; then
             scope=weekly
           elif [ "$EVENT" = schedule ]; then
@@ -61,7 +64,9 @@ jobs:
           else
             scope=nightly
           fi
-          if [ "$scope" = change ]; then
+          if [ "$scope" = cache ]; then
+            hosts='[]'
+          elif [ "$scope" = change ]; then
             hosts='["macos", "windows"]'
           else
             hosts='["linux", "macos", "windows"]'
@@ -75,9 +80,10 @@ jobs:
     # Per job, not per workflow: a run whose jobs are skipped (another label
     # added) must not cancel one that is testing.  Each nightly run's groups
     # are its own: neither a run started by hand nor the next nightly cancels
-    # its jobs, or its re-run's (arm64-report.yml).
+    # its jobs, or its re-run's (arm64-report.yml).  A push's are apart from
+    # a run started by hand on main.
     concurrency:
-      group: arm64-rootfs-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
+      group: arm64-rootfs-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id || github.event_name == 'push' && 'cache' }}
       cancel-in-progress: true
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
@@ -101,6 +107,8 @@ jobs:
           key: ${{ steps.key.outputs.key }}
           # Saved on Linux, restored on macOS too.
           enableCrossOsArchive: true
+          # A push to main's run only saves the images, when missing
+          lookup-only: ${{ needs.plan.outputs.scope == 'cache' }}
 
       - name: Install cpio
         if: steps.rootfs-cache.outputs.cache-hit != 'true'
@@ -131,6 +139,7 @@ jobs:
       # a cache entry Linux saved without zstd, which the self-hosted Macs
       # lack.
       - name: Hand the images to the test jobs
+        if: needs.plan.outputs.scope != 'cache'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rootfs-arm64
@@ -144,7 +153,7 @@ jobs:
   # the Linux runner, so in tier 3 only.
   static-arm64:
     needs: plan
-    if: needs.plan.outputs.scope != 'change'
+    if: needs.plan.outputs.scope == 'nightly' || needs.plan.outputs.scope == 'weekly'
     concurrency:
       group: arm64-static-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
@@ -176,6 +185,7 @@ jobs:
   test-arm64:
     name: test (${{ matrix.os }}-arm64)
     needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
     concurrency:
       group: arm64-test-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
@@ -250,6 +260,7 @@ jobs:
   demos-arm64:
     name: demos (${{ matrix.os }}-arm64)
     needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
     concurrency:
       group: arm64-demos-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
@@ -293,6 +304,7 @@ jobs:
   integrations-arm64:
     name: ${{ matrix.package }} (${{ matrix.os }}-arm64, ${{ matrix.deps }} ${{ matrix.package }}, Python ${{ matrix.python }})
     needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
     concurrency:
       group: arm64-${{ matrix.package }}-${{ matrix.deps }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
@@ -377,7 +389,7 @@ jobs:
   clickhouse-arm64:
     name: clickhouse (linux-arm64)
     needs: [plan, rootfs-arm64]
-    if: needs.plan.outputs.scope != 'change'
+    if: needs.plan.outputs.scope == 'nightly' || needs.plan.outputs.scope == 'weekly'
     concurrency:
       group: arm64-clickhouse-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
@@ -412,6 +424,7 @@ jobs:
   conformance-arm64:
     name: conformance (${{ matrix.os }}-arm64)
     needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
     concurrency:
       group: arm64-conformance-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
@@ -445,6 +458,7 @@ jobs:
   bench-arm64:
     name: "bench (${{ matrix.os }}-arm64, ${{ matrix.runtime }})"
     needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
     concurrency:
       group: arm64-bench-${{ matrix.runtime }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
       cancel-in-progress: true
