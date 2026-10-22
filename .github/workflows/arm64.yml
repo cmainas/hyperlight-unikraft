@@ -300,9 +300,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [smolagents, mcp]
+        package: [smolagents, mcp, verl]
         os: [linux, macos, windows]
         deps: [oldest, newest]
+        # verl runs on Linux only
+        exclude:
+          - package: verl
+            os: macos
+          - package: verl
+            os: windows
         include:
           - os: linux
             runner: [self-hosted, Linux, arm64, kvm]
@@ -314,6 +320,8 @@ jobs:
             floors: smolagents
           - package: mcp
             floors: mcp smolagents-hyperlight smolagents anyio pydantic rich
+          - package: verl
+            floors: filelock
           - package: mcp
             deps: newest
             requires: -e ../smolagents
@@ -366,7 +374,8 @@ jobs:
         env:
           RUN_ALL: "1"
           HLUK_PATH: ${{ github.workspace }}/target/release/hluk${{ runner.os == 'Windows' && '.exe' || '' }}
-          HLUK_INITRD: ${{ github.workspace }}/build-elfloader/agent-rootfs.cpio
+          # verl-hyperlight's tests run the python image; the others' the agent image, at the memory it needs
+          HLUK_INITRD: ${{ github.workspace }}/build-elfloader/${{ matrix.package == 'verl' && 'python' || 'agent' }}-rootfs.cpio
           HLUK_SCRATCH_MB: "1536"
         run: python -m pytest -v
 
