@@ -2,7 +2,7 @@
 # trimmed for linux-musl by the .NET SDK, on the published dotnet-aot base
 # (exec driver, musl linker, glibc compat symlinks). `hluk build` builds it
 # for the host's CPU and exports it as .hluk/rootfs.cpio; `hluk run` boots it.
-FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine@sha256:188d6a75ab67d2b2d61b4bbcd2d88030d1a058945236f0bf1d548dec312092a4 AS build
+FROM mcr.microsoft.com/dotnet/sdk:9.0-alpine@sha256:a4ef33907bcb0cf387a5e43fa9180667bf68d47527d5d219a9d8ee280c184130 AS build
 WORKDIR /src
 COPY Program.cs App.csproj ./
 RUN dotnet publish -c Release --os linux-musl --self-contained \
