@@ -1518,11 +1518,13 @@ class HyperlightGuestTests(CommonExecutorTests):
         assert self.executor("1 + 1").output == "2"
 
     def test_guest_loop_failure_is_reported(self):
-        self.executor("import os, sys\nos.close(sys._getframe(1).f_globals['requests_fd'])")
+        # The replies' descriptor, so that the loop fails replying to this very step. Closing the requests' one fails it
+        # reading the next step, which can come before the host sends that step: the host then restarts the guest and
+        # runs the step, and nothing raises
         with pytest.raises(
             AgentError, match=r"crashed while executing code \(OSError: \[Errno 9\] Bad file descriptor\)"
         ):
-            self.executor("1")
+            self.executor("import os, sys\nos.close(sys._getframe(1).f_globals['replies_fd'])")
         assert self.executor("1 + 1").output == "2"
 
     def test_exception_that_cannot_say_what_it_is_keeps_state(self):
