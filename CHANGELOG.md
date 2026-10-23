@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - CI runs in three tiers, described in [`docs/ci.md`](docs/ci.md): Linux and Windows on x86_64 on every pull request, macOS and Windows arm64 on pull requests labelled `ci/arm64`, and Linux arm64 too nightly, blocking nothing. A pull request runs the tier-1 jobs its files call for: documentation alone gets the spell check, `integrations/<name>/` alone gets lint, the Rust tests and that integration, smolagents bringing MCP's (the `ci/integrations` label adds them all). `ci-report.yml` re-runs a failed run on `main` once, the nightly run or the newest push's, and files each job that fails again, a timeout included, as an issue labelled `ci/nightly` or `ci/main`.
 - Dependabot also proposes updates for the Rust toolchain (`rust-toolchain.toml`, labelled `ci/arm64`) and for the libraries of the Python integrations (smolagents, MCP, verl), whose caps it widens when a release past one is out (a minor, for a 0.x cap), keeping the floors CI tests.
+- A driver can ask how many times the guest was restored from a snapshot (`HLCALL_IOC_RESTORES`, `hl_driver_restored()` in `drivers/hl_driver.h`), to reseed what its runtime seeded before the snapshot ([`docs/driver.md`](docs/driver.md)).
 
 ### Changed
 

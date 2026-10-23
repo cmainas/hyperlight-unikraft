@@ -4,7 +4,7 @@ A driver is the program the kernel starts in a runtime image.  It brings its run
 
 ## The device
 
-The whole contract is one character device, `/dev/hlcall`, and six operations on it, listed in the order a driver uses them:
+The whole contract is one character device, `/dev/hlcall`, and seven operations on it, listed in the order a driver uses them:
 
 | Operation | Meaning |
 |---|---|
@@ -12,10 +12,11 @@ The whole contract is one character device, `/dev/hlcall`, and six operations on
 | `ioctl(HLCALL_IOC_MAXLEN)` | How large a call can be, a `uint64_t` the kernel knows from the transport geometry the host published.  The driver allocates its read buffer from it, once. |
 | `read()` | Blocks until the host issues a call, then returns it whole: the FunctionCall FlatBuffer as the host encoded it.  Reading again completes the previous call. |
 | `ioctl(HLCALL_IOC_GETENV)` | The variables the embedder set (`--env`, `set_env_vars`) as they are now, `KEY=VALUE` entries separated by NUL, into a buffer the driver provides.  Asked at the top of every call; the kernel answers from its own copy unless the embedder changed the variables since (each call carries the host's version of them), so an unchanged environment costs no host call. |
+| `ioctl(HLCALL_IOC_RESTORES)` | How many times the guest was restored from a snapshot, a `uint64_t`.  A driver whose runtime seeded random generators before the snapshot asks it at the top of each call (`hl_driver_restored()`) and reseeds them when it went up; see [random.md](random.md). |
 | `ioctl(HLCALL_IOC_HOSTCALL)` | Call one of the embedder's functions (`SandboxBuilder::host_function`) by name and get its reply. The kernel forwards it as the host function `HostCall(name, args)`. Only while a call is in flight. |
 | `write()` | An `int32_t` status for the call being served, optionally followed by its result, which the kernel reports with the entry's `Yield`. Written when the call failed or has a result. Refused when no call is in flight. |
 
-The ioctl numbers, `_IOR('H', 1, uint64_t)`, `_IOWR('H', 2, struct hlcall_env)` and `_IOWR('H', 3, struct hlcall_hostcall)`, are built with the standard macros, so the argument's size is part of the number and a layout mismatch between the two sides reads as `ENOTTY`.  The kernel's `plat/hyperlight/include/hyperlight/step.h` is the source of truth; `hl_driver.h` mirrors it.
+The ioctl numbers, `_IOR('H', 1, uint64_t)`, `_IOWR('H', 2, struct hlcall_env)`, `_IOWR('H', 3, struct hlcall_hostcall)` and `_IOR('H', 4, uint64_t)`, are built with the standard macros, so the argument's size is part of the number and a layout mismatch between the two sides reads as `ENOTTY`.  The kernel's `plat/hyperlight/include/hyperlight/step.h` is the source of truth; `hl_driver.h` mirrors it.
 
 ## From boot to a call
 
