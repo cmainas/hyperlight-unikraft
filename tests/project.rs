@@ -322,6 +322,7 @@ fn templates_lists_every_tier_one_runtime_first() {
         "python-shell",
         "dotnet",
         "java",
+        "php",
         "go",
         "rust",
         "c",
@@ -391,6 +392,39 @@ fn the_python_shell_template_runs_shell_commands() {
     assert!(t.contains("Hello from pysh!"), "got: {t}");
     assert!(t.contains("/bin/sh"), "`which sh` did not run: {t}");
     assert!(t.contains("PIPES WORK"), "the pipe did not run: {t}");
+}
+
+/// The php template's script runs from the warm snapshot on the second
+/// run, and its handler answers a guest function call.
+#[test]
+fn the_php_template_runs_warm_and_its_handler_answers_calls() {
+    let root = temp_dir("project-php");
+    let cache = temp_dir("project-php-cache");
+    let project = init_local(root.path(), cache.path(), "hello", "php", "php");
+    let out = hluk(&project, cache.path(), &["run"]);
+    assert!(out.status.success(), "run failed: {}", text(&out));
+    assert!(
+        text(&out).contains("Hello from hello!"),
+        "got: {}",
+        text(&out)
+    );
+    let out = hluk(
+        &project,
+        cache.path(),
+        &[
+            "run",
+            "--log-level",
+            "info",
+            "--call",
+            "handler",
+            "--input",
+            r#"{"name":"PHP"}"#,
+        ],
+    );
+    assert!(out.status.success(), "warm run failed: {}", text(&out));
+    let t = text(&out);
+    assert!(t.contains("restored=true"), "expected a restore: {t}");
+    assert!(t.contains(r#"{"greeting":"Hello, PHP!"}"#), "got: {t}");
 }
 
 #[test]
