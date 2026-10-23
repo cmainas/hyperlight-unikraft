@@ -24,7 +24,7 @@ FAKE_HLUK = f"""#!{sys.executable}
 import json, os, sys, time
 args = sys.argv[1:]
 if args == ["--version"]:
-    print(os.environ.get("FAKE_HLUK_VERSION", "hluk 0.18.0"))
+    print(os.environ.get("FAKE_HLUK_VERSION", "hluk 0.19.0"))
     sys.exit(0)
 entry = {{"args": args, "pid": os.getpid()}}
 if "--mount" in args:
@@ -253,10 +253,11 @@ def test_hluk_dies_with_its_worker(fake_hluk, monkeypatch, tmp_path):
     raise AssertionError("hluk outlived its worker")
 
 
-def test_old_hluk_is_refused(fake_hluk, monkeypatch):
-    monkeypatch.setenv("FAKE_HLUK_VERSION", "hluk 0.17.2")
+@pytest.mark.parametrize("version", ["hluk 0.18.0", "hluk 0.18.0+dev.44ee170", "hluk 0.19.0-rc1", ""])
+def test_old_hluk_is_refused(fake_hluk, monkeypatch, version):
+    monkeypatch.setenv("FAKE_HLUK_VERSION", version)
     response, _ = run_case("hyperlight://", "pass", None, 5, 256)
-    assert response["status"] == "SandboxError" and "0.18.0" in response["message"]
+    assert response["status"] == "SandboxError" and "needs hluk 0.19.0 or later" in response["message"]
     assert fake_hluk() == []
 
 
@@ -352,6 +353,13 @@ def test_image_names(fake_hluk, url, runtime):
     assert args[args.index("--runtime") + 1] == runtime
 
 
+@pytest.mark.parametrize("version", ["hluk 0.19.0", "hluk 0.19.0+dev.1234567", "hluk 0.20.0-rc1", "hluk 1.0.0"])
+def test_recent_hluk_is_accepted(fake_hluk, monkeypatch, version):
+    monkeypatch.setenv("FAKE_HLUK_VERSION", version)
+    response, _ = run_case("hyperlight://", "pass", None, 5, 256)
+    assert response["status"] == "Success"
+
+
 def test_a_trailing_slash_on_a_rootfs_path_is_dropped(fake_hluk):
     run_case("hyperlight:///images/my-rootfs.cpio/", "pass", None, 5, 256)
     args = fake_hluk()[0]["args"]
@@ -360,7 +368,7 @@ def test_a_trailing_slash_on_a_rootfs_path_is_dropped(fake_hluk):
 
 def test_limits_below_what_the_image_runs_in_are_refused(fake_hluk, tmp_path):
     # The guest kernel does not enforce a process's own limit, so such a limit would not hold
-    for url in ("hyperlight://agent", "hyperlight://ghcr.io/hyperlight-dev/hyperlight-unikraft/agent:initrd-v0.18.0"):
+    for url in ("hyperlight://agent", "hyperlight://ghcr.io/hyperlight-dev/hyperlight-unikraft/agent:initrd-v0.19.0"):
         response, error = run_case(url, "pass", None, 5, 256)
         assert response is None and "use at least 720" in error
     rootfs = tmp_path / "big.cpio"
@@ -478,6 +486,20 @@ needs_hluk = pytest.mark.skipif(
 )
 # The guest: the python image of the hluk on PATH, and in CI the repository's own build of it
 URL = "hyperlight://" + (os.path.abspath(os.environ["HLUK_INITRD"]) if os.getenv("HLUK_INITRD") else "")
+
+
+# The memory tests' run timeout: on the Linux arm64 runners (VMs on Apple silicon, so nested
+# virtualization) the guest's first touch of each page is many times slower: filling a 405 MiB
+# guest took over 10 s there, where x86 takes under 1 s, so these get several times that.
+MEMORY_TEST_TIMEOUT = 120
+
+
+def _why(response, error):
+    """A real case's outcome, for an assertion message: its status and the ends of its output."""
+    if not response or not response.get("run_result"):
+        return response, error
+    r = response["run_result"]
+    return {**r, "stdout": r["stdout"][-300:], "stderr": r["stderr"][-300:]}
 
 
 def _score(code, inputs, outputs):
@@ -790,20 +812,51 @@ except OSError:
     assert score == 1.0, metadata
 
 
+def _host_memory_available_mb():
+    try:
+        with open("/proc/meminfo") as f:
+            return next(int(line.split()[1]) >> 10 for line in f if line.startswith("MemAvailable:"))
+    except (OSError, StopIteration, ValueError):
+        return 0
+
+
 @needs_hluk
-def test_real_memory_limit_is_the_solutions():
+@pytest.mark.parametrize(
+    "solution_mb, memory_limit_mb",
+    [
+        (340, 384),
+        # Sandbox Fusion's usual limit, in a 1.4 GB guest: only where the host can back it beside
+        # the test run, which the Linux arm64 runners (3 GB VMs) cannot
+        pytest.param(
+            900,
+            1024,
+            marks=pytest.mark.skipif(_host_memory_available_mb() < 3072, reason="needs 3 GiB of free host memory"),
+        ),
+    ],
+)
+def test_real_memory_limit_is_the_solutions(solution_mb, memory_limit_mb):
     # memory_limit_mb is what the solution may allocate, as under Sandbox Fusion, not the VM's
-    # whole memory, which also holds the guest's kernel and interpreter.
-    code = "x = bytearray(900 << 20)\nx[::4096] = b'\\x01' * len(x[::4096])\nprint('ok')"
-    response, _ = run_case(URL, code, None, 30, 1024)
-    assert response["run_result"]["stdout"] == "ok\n", response["run_result"]["stderr"][-300:]
+    # whole memory, which also holds the guest's kernel and interpreter: in a guest only the size
+    # of the limit, the solution would run out of memory (even 300 MiB does in a 405 MiB guest)
+    code = f"x = bytearray({solution_mb} << 20)\nx[::4096] = b'\\x01' * len(x[::4096])\nprint('ok')"
+    response, error = run_case(URL, code, None, MEMORY_TEST_TIMEOUT, memory_limit_mb)
+    why = _why(response, error)
+    assert response and response["run_result"], why
+    assert response["status"] == "Success" and response["run_result"]["stdout"] == "ok\n", why
 
 
 @needs_hluk
 def test_real_memory_limit():
-    response, _ = run_case(URL, "x = bytearray(512 * 1024 * 1024)", None, 10, 256)
-    assert response["status"] == "Failed"
-    assert response["run_result"]["return_code"] != 0
+    response, error = run_case(URL, "x = bytearray(512 * 1024 * 1024)", None, MEMORY_TEST_TIMEOUT, 256)
+    why = _why(response, error)
+    assert response and response["run_result"], why
+    r = response["run_result"]
+    # Out of memory, not out of time or some other crash: Python's MemoryError, or the guest
+    # kernel killing the process when it touches a page there is no memory for, which hluk
+    # reports as the guest exiting with 137 (the kernel's own message goes to its log; this
+    # solution does not exit with 137 itself)
+    assert r["status"] == "Finished", why
+    assert (r["return_code"] == 1 and "MemoryError" in r["stderr"]) or r["return_code"] == 137, why
 
 
 def test_url_detection():
