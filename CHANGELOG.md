@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A snapshot could leave out part of a guest's memory: the kernel mapped each aligned 2 MiB of an `mmap`ed range (an ELF segment the elfloader maps, say) with one large page, which Hyperlight's snapshot drops, so a guest restored from it could fault there. The kernel now maps 4 KiB pages only, and `mmap(MAP_HUGETLB)` fails with `ENOMEM`, as on Linux without a hugepage pool.
 - The drivers set every host environment variable again at the top of every call, with `setenv()`, which on musl frees the string the variable had: code still holding it read freed memory (PHP's `putenv()` keeps the string it replaces, SQLite caches `getenv("TMPDIR")`). A variable is now set only when it changed, with `putenv()` and a string that stays.
 - Programs did not get random `AT_RANDOM` bytes of their own: the elfloader pointed the auxiliary vector at a stale stack frame. Go's runtime seeds from those bytes, so `math/rand` drew the same numbers in every clone of a snapshot. The bytes are now copied onto the program's stack, as Linux does.
+- A program started with an empty argument or environment string (`sh -c 'cmd' ''`, a BusyBox hush pipeline led by a builtin, as `set | grep`) crashed the guest's kernel (`Assertion failure: len`). Empty strings now reach the program, as on Linux.
 
 ## [v0.19.0]
 

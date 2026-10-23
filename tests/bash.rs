@@ -353,3 +353,16 @@ fn bash_refuses_a_call() {
     // The driver serves the next call as usual.
     sandbox.run("echo still-here").unwrap();
 }
+/// An empty argument or environment string reaches a program, as on
+/// Linux: hush passes them when it re-executes itself for a pipeline.
+#[test]
+fn bash_empty_strings_reach_programs() {
+    let mut sandbox = SandboxBuilder::from_initrd(require_rootfs("bash"))
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run("sh -c 'echo \"[$1]\"' sh ''\nX=1; set | grep -q '^X=' && echo piped")
+        .unwrap();
+    assert_eq!(sandbox.drain_output(), "[]\npiped\n");
+}
