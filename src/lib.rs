@@ -291,6 +291,7 @@ pub const RUNTIME_SCRATCH_MB: &[(&str, usize)] = &[
     ("rust", 64),
     ("quickjs", 64),
     ("go", 128),
+    ("php", 128),
     ("bash", 256),
     ("python", 256),
     ("python-shell", 256),
@@ -315,6 +316,7 @@ const DRIVER_RUNTIME: &[(&str, &str)] = &[
     ("hl_javadriver", "java"),
     ("hl_pwshdriver", "powershell"),
     ("hl_quickjsdriver", "quickjs"),
+    ("hl_phpdriver", "php"),
     ("hl_wasmtimedriver", "wasmtime"),
     ("hl_bashdriver", "bash"),
     ("hl_godriver", "go"),
@@ -2376,8 +2378,9 @@ impl SandboxBuilder {
     /// and in quickjs `a.b` is also the export `b` of the module `host:a`;
     /// Python as `hyperlight.call(name, *args)` or `hyperlight.host.a.b()`
     /// (python, python-shell, agent); C# as `Host.Call(name, args)`
-    /// (dotnet-jit); Java as `Host.call(name, args)` (java); the wasmtime
-    /// image satisfies a module's or a component's import `a.b` with it.
+    /// (dotnet-jit); Java as `Host.call(name, args)` (java); PHP as
+    /// `Hyperlight\call($name, ...$args)` (php); the wasmtime image
+    /// satisfies a module's or a component's import `a.b` with it.
     ///
     /// ```no_run
     /// # use hyperlight_unikraft::SandboxBuilder;
@@ -2709,7 +2712,8 @@ pub enum Exec {
     /// Call the function `function` the guest has defined, with `input`,
     /// for its result: in the quickjs and node images a global function,
     /// in the python ones a function of `__main__`, in dotnet-jit a public
-    /// static method, in java a static method, called with `input` parsed
+    /// static method, in java a static method, in php a callable
+    /// (`greet`, `Handlers::greet`), called with `input` parsed
     /// as JSON and its return
     /// value (awaited) serialized back; in the wasmtime image an export of
     /// the module or component the guest has loaded, `input` a JSON array
