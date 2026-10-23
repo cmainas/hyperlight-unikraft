@@ -13,6 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - CI: pull requests labelled `ci/arm64` no longer run on the Linux arm64 runner, which `ci-passed` no longer waits for, and pushes to `main` no longer run the arm64 tests, only refresh the arm64 guest images' cache: the nightly run tests both. `ci-passed` counts only the pull request's own arm64 run, not one started by hand. Dependabot no longer labels the actions' updates `ci/arm64`.
 
+### Fixed
+
+- `just conformance` now and then ran a module its skip list names (`known_failures.toml`, `CONFORMANCE_SKIP`), failing the job when it crashed (`test_regrtest` on Linux arm64): the skip-list check, a pipe into `grep -q`, could read an early exit of `grep` as a miss.
+
 ## [v0.19.0]
 
 ### Added

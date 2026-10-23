@@ -1514,13 +1514,21 @@ conformance runtime *modules:
     echo "==> Running ${#test_modules[@]} modules ($skip_count in skip list)"
     echo ""
 
+    # Matched in bash itself, not by piping the list into grep -q: printf
+    # wrote it a few lines at a time, and grep, gone at its match, could fail
+    # a later write with SIGPIPE, which pipefail made a miss: the module then
+    # ran.  (A here-string is a temp file in bash 3.2, which a full disk would
+    # fail the same way.)
+    skip_lines=$'\n'"$skip_list"$'\n'
     for mod in "${test_modules[@]}"; do
-        if printf '%s\n' "$skip_list" | grep -qxF "$mod"; then
-            echo "SKIP $mod"
-            ((skip++)) || true
-            ((total++)) || true
-            continue
-        fi
+        case $skip_lines in
+            *$'\n'"$mod"$'\n'*)
+                echo "SKIP $mod"
+                ((skip++)) || true
+                ((total++)) || true
+                continue
+                ;;
+        esac
 
         # Run this module in its own guest with a timeout; the SIGKILL
         # follows when the process ignores SIGTERM (some modules spin the
