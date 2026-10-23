@@ -255,3 +255,88 @@ fn java_clones_draw_their_own() {
         ],
     );
 }
+
+/// Random.Shared, new Random(), RandomNumberGenerator (OpenSSL's),
+/// Guid.NewGuid and RandomNumberGenerator.GetInt32, each used before the
+/// snapshot.
+#[test]
+fn dotnet_clones_draw_their_own() {
+    let builder = SandboxBuilder::from_initrd(require_rootfs("dotnet-jit")).scratch_mb(768);
+    let outputs = two_clones(
+        builder,
+        Exec::Code(
+            "using System.Security.Cryptography;\n\
+             Random.Shared.NextInt64(); new Random().NextInt64(); RandomNumberGenerator.GetBytes(16);\n\
+             using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(new byte[16]);\n\
+             Guid.NewGuid(); RandomNumberGenerator.GetInt32(10);"
+                .into(),
+        ),
+        Exec::Code(
+            "using System.Security.Cryptography;\n\
+             Console.WriteLine(Random.Shared.NextInt64());\n\
+             Console.WriteLine(new Random().NextInt64());\n\
+             Console.WriteLine(Convert.ToHexString(RandomNumberGenerator.GetBytes(16)));\n\
+             var b = new byte[16]; using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(b);\n\
+             Console.WriteLine(Convert.ToHexString(b));\n\
+             Console.WriteLine(Guid.NewGuid());\n\
+             Console.WriteLine(RandomNumberGenerator.GetInt32(int.MaxValue));"
+                .into(),
+        ),
+    );
+    assert_each_line_differs(
+        &outputs,
+        &[
+            "Random.Shared",
+            "new Random()",
+            "RandomNumberGenerator.GetBytes",
+            "RandomNumberGenerator.Create",
+            "Guid.NewGuid",
+            "RandomNumberGenerator.GetInt32",
+        ],
+    );
+}
+
+/// A guest function call runs on the dispatcher's own thread, which the
+/// snapshot has, not on a thread of its own as run code does: Java's
+/// ThreadLocalRandom and .NET's Random.Shared there, each used before the
+/// snapshot, through a guest function call.
+#[test]
+fn guest_function_calls_draw_their_own() {
+    let cases = [
+        (
+            "java",
+            512,
+            "import java.util.concurrent.*;\n\
+             long draw() { return ThreadLocalRandom.current().nextLong(); }",
+            "draw",
+        ),
+        (
+            "dotnet-jit",
+            768,
+            "public static class Handlers { public static long Draw() => Random.Shared.NextInt64(); }",
+            "Draw",
+        ),
+    ];
+    for (runtime, scratch, define, function) in cases {
+        let snap_dir = temp_dir("snapshot-random-call");
+        let mut sandbox = SandboxBuilder::from_initrd(require_rootfs(runtime))
+            .scratch_mb(scratch)
+            .boot()
+            .unwrap();
+        sandbox.run(define).unwrap();
+        sandbox.call(function, "").unwrap();
+        sandbox.snapshot_to(&snap_dir).unwrap();
+        drop(sandbox);
+        let draws = [0, 1].map(|_| {
+            let mut clone = SandboxBuilder::from_snapshot_dir(&snap_dir)
+                .unwrap()
+                .boot()
+                .unwrap();
+            clone.call(function, "").unwrap()
+        });
+        assert_ne!(
+            draws[0], draws[1],
+            "two {runtime} clones drew the same: {draws:?}"
+        );
+    }
+}

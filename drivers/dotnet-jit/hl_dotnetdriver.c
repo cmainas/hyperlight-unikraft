@@ -228,6 +228,14 @@ static int dotnet_dispatch(const uint8_t *fc, size_t fc_len)
 		goto out;
 	}
 
+	/* Restored from a snapshot: the child's generators first. */
+	if (hl_driver_restored() && hl_child_send_reseed(g_pipe_to_dotnet) < 0) {
+		fprintf(stderr, "hl_dotnetdriver: .NET had exited with status %d\n",
+			dotnet_reap());
+		fflush(stderr);
+		goto out;
+	}
+
 	/* Send the call (hl_child.h), then wait for its status.  The read
 	 * blocks and yields to the cooperative scheduler, which switches to
 	 * the child .NET thread. */
