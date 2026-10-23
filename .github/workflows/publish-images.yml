@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime: [python, node, agent, python-shell, bash, c, go, rust, dotnet-aot, dotnet-jit, java, powershell, quickjs, wasmtime]
+        runtime: [python, node, agent, python-shell, bash, c, go, rust, dotnet-aot, dotnet-jit, java, php, powershell, quickjs, wasmtime]
         arch: [amd64, arm64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -85,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runtime: [python, node, agent, python-shell, bash, c, go, rust, dotnet-aot, dotnet-jit, java, powershell, quickjs, wasmtime]
+        runtime: [python, node, agent, python-shell, bash, c, go, rust, dotnet-aot, dotnet-jit, java, php, powershell, quickjs, wasmtime]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

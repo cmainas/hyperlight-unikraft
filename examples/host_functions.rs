@@ -10,11 +10,12 @@
 //! - Python: `hyperlight.host.math.add(...)`;
 //! - C#: `Host.Call<long>("math.add", ...)` (dotnet-jit);
 //! - Java: `Host.call(long.class, "math.add", ...)`;
+//! - PHP: `Hyperlight\call('math.add', ...)`;
 //! - WebAssembly: the WIT interface `my:app/math` the component imports,
 //!   from a plain export and from an async one (WASI 0.3).
 //!
 //! ```sh
-//! for r in quickjs node python dotnet-jit java wasmtime; do just build-rootfs $r; done
+//! for r in quickjs node python dotnet-jit java php wasmtime; do just build-rootfs $r; done
 //! (cd examples/wasmtime/calculator && cargo build --release --target wasm32-wasip2)
 //! cargo run --release --example host_functions
 //! ```
@@ -83,6 +84,13 @@ fn main() -> hyperlight_unikraft::Result<()> {
          long sumOfSquares(Pair p) { return Host.call(long.class, \"math.add\", p.a() * p.a(), p.b() * p.b()); }",
     )?;
     show(&mut java, "sumOfSquares", r#"{"a": 3, "b": 4}"#)?;
+
+    println!("php:");
+    let mut php = sandbox("php")?.boot()?;
+    php.run(
+        "function sum_of_squares(array $p): int { return Hyperlight\\call('math.add', $p['a'] ** 2, $p['b'] ** 2); }",
+    )?;
+    show(&mut php, "sum_of_squares", r#"{"a": 3, "b": 4}"#)?;
 
     println!("wasmtime:");
     let component = Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -133,6 +133,7 @@ updates:
       - /drivers/go
       - /drivers/java
       - /drivers/node
+      - /drivers/php
       - /drivers/powershell
       - /drivers/python
       - /drivers/python-shell

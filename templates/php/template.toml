@@ -1,0 +1,4 @@
+[template]
+description = "A PHP 8.5 script, run by PHP embedded in the guest (SQLite, mbstring, DOM, OpenSSL)"
+runtime = "php"
+tier = 2

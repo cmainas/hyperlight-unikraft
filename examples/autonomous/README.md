@@ -9,6 +9,7 @@ An appliance whose **entire workload lives in the initrd** and runs with **no ho
 | Bash | `hl_bashdriver` | `/entrypoint.sh` |
 | .NET (JIT) | `hl_dotnetdriver` | `/entrypoint.cs` |
 | Java | `hl_javadriver` | `/entrypoint.java` |
+| PHP | `hl_phpdriver` | `/entrypoint.php` |
 | PowerShell | `hl_pwshdriver` | `/entrypoint.ps1` |
 | C / Rust / Go / .NET AOT | `hl_execdriver` | `/entrypoint` (an executable) |
 

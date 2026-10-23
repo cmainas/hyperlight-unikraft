@@ -37,6 +37,7 @@ scratch_java       := "512"
 scratch_dotnet_jit := "768"
 scratch_powershell := "1024"
 scratch_quickjs    := "64"
+scratch_php        := "128"
 scratch_wasmtime   := "256"
 scratch_agent        := "1536"
 scratch_python_shell   := "256"
@@ -58,6 +59,7 @@ _scratch-mb runtime:
         else if runtime == "dotnet-jit" { scratch_dotnet_jit } \
         else if runtime == "powershell" { scratch_powershell } \
         else if runtime == "quickjs" { scratch_quickjs } \
+        else if runtime == "php" { scratch_php } \
         else if runtime == "wasmtime" { scratch_wasmtime } \
         else if runtime == "agent" { scratch_agent } \
         else if runtime == "python-shell" { scratch_python_shell } \
@@ -773,6 +775,9 @@ example-quickjs: (run "quickjs" (examples_dir / "quickjs" / "hello.js"))
 
 # Run the Java hello world example
 example-java: (run "java" (examples_dir / "java" / "Hello.java"))
+
+# Run the PHP hello world example
+example-php: (run "php" (examples_dir / "php" / "hello.php"))
 
 # Compiled runtime examples (C, Rust, Go, dotnet-aot) require compiling
 # on the host first.  See examples/<runtime>/README.md for instructions,

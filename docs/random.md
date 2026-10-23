@@ -28,6 +28,7 @@ What each image covers:
 | java | `Math.random`, `StrictMath.random`, `Collections.shuffle`, `ThreadLocalRandom` on the threads calls run on, and the seeds of every new `Random`, `SplittableRandom`, `ThreadLocalRandom` thread and `RandomGenerator` algorithm (`getDefault()`, `of(...)`), `UUID.randomUUID`'s `SecureRandom` (a DRBG reseeded, NativePRNG's read-ahead dropped), and the seeders new DRBGs and SHA1PRNGs draw from | `SecureRandom`'s NativePRNG, the default, which mixes `/dev/urandom` into every draw |
 | dotnet-jit | `Random.Shared` on the thread calls run on, OpenSSL (`RandomNumberGenerator`) | `new Random()`, `Guid.NewGuid()` |
 | bash | `$RANDOM` | `$RANDOM` in a subshell or a new shell, which BusyBox seeds from the kernel |
+| php | | `mt_rand`, `rand`, `shuffle` and the combined LCG, OpenSSL and SQLite, reseeded on every call; `random_bytes`, `random_int` and `Random\Randomizer`'s default engine, read from the kernel.  A seed code gave `mt_srand()` stays, across a restore too |
 | quickjs | | `Math.random`, reseeded on every call |
 | wasmtime | | `wasi:random`, read from the kernel on every draw |
 | powershell, c, go, rust, dotnet-aot | | each call runs a new process, which seeds from the kernel |

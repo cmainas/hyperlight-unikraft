@@ -26,7 +26,7 @@ let out = sandbox.call("greet", r#"{"id": 7}"#)?;
 assert_eq!(out, r#"{"message":"Hello, Ada"}"#);
 ```
 
-[`examples/host_functions.rs`](../examples/host_functions.rs) does the same in every runtime that makes host function calls: `cargo run --release --example host_functions`. quickjs, node, python, dotnet-jit and java each also have a `handler` example to run with `hluk run --call` (`examples/{quickjs,node,python}/handler.*`, `examples/dotnet-jit/Handler.cs`, `examples/java/Handler.java`); for wasmtime, [`examples/wasmtime/calculator`](../examples/wasmtime/calculator/) is a library component to call.
+[`examples/host_functions.rs`](../examples/host_functions.rs) does the same in every runtime that makes host function calls: `cargo run --release --example host_functions`. quickjs, node, python, dotnet-jit, java and php each also have a `handler` example to run with `hluk run --call` (`examples/{quickjs,node,python,php}/handler.*`, `examples/dotnet-jit/Handler.cs`, `examples/java/Handler.java`); for wasmtime, [`examples/wasmtime/calculator`](../examples/wasmtime/calculator/) is a library component to call.
 
 ## Guest function calls
 
@@ -44,11 +44,12 @@ The kernel's own messages are not in the output. They are Hyperlight's guest log
 | wasmtime | an export of the library loaded last | a JSON array, one element per parameter | the results as JSON |
 | dotnet-jit | a `public static` method of a public class in a snippet run earlier (`Greet`, or `Handlers.Greet`) | JSON, deserialized into its one parameter | the return value (awaited if it is a `Task`) as JSON, camelCase |
 | java | a static method of a snippet run earlier, top-level (`greet`) or in a class (`Handlers.greet`); a bare name is the top-level method when there is one, and is refused when it names two overloads or two classes' methods | JSON, converted to its one parameter: a record, `Map`, `List`, array, enum or simple value | the return value (awaited if it is a `Future`) as JSON, records and maps as objects |
+| php | a PHP callable named by a string: a function (`greet`, `App\greet`) or a static method (`Handlers::greet`) | JSON, decoded into its one argument, objects as arrays | the return value as JSON, a list as an array and any other array as an object, so `{}` comes back as `[]` |
 
-Empty input calls the function with no argument. A function that returns nothing (`undefined`, `None`, `void`, no results) gives an empty result.
+Empty input calls the function with no argument. A function that returns nothing (`undefined`, `None`, `void`, no results, and in PHP `null`) gives an empty result.
 
 - **State carries over.** Globals, statics, module caches and a WebAssembly instance's memory stay from one call to the next. To have them in a warm snapshot, define the function in `warm_exec`.
-- **Errors.** If the function throws or traps, doesn't exist, or can't take the input, the call fails with `Error::CallFailed`. The details are in the output. The guest keeps serving later calls; a WebAssembly component that trapped has to be loaded again.
+- **Errors.** If the function throws or traps, doesn't exist, or can't take the input, the call fails with `Error::CallFailed`. The details are in the output. The guest keeps serving later calls; a WebAssembly component that trapped has to be loaded again. In PHP a fatal error (`memory_limit` reached, say) also ends the request: the next call starts a new one, without the functions defined before.
 - **Async work.** QuickJS and Node run the timers and jobs the function started before returning. A promise that nothing can settle fails the call instead of hanging it.
 - **Not waiting.** `submit(Exec::Call { .. })` sends the call without waiting, and `take_result()` collects the result once `step` reports `CallDone`.
 - **Other images** fail a guest function call. PowerShell and the compiled images (c, go, rust, dotnet-aot) start a new process for every run, so nothing they define is left to call; bash has no way to return a value but stdout.
@@ -78,6 +79,7 @@ The CLI registers no host functions, so a host function call fails there. Use th
 | python, python-shell, agent | `hyperlight.call("math.add", 2, 3)`, or `hyperlight.host.math.add(2, 3)` | raises `hyperlight.HostError` |
 | dotnet-jit | `Host.Call<int>("math.add", 2, 3)`, or `Host.Call(...)` for a `JsonElement?` | throws `Hyperlight.HostException` |
 | java | `Host.call(int.class, "math.add", 2, 3)`, or `Host.call(...)` for a `Map`, `List`, `String`, `Long` (`BigInteger` past its range), `Double`, `Boolean` or `null` | throws `hyperlight.HostException` |
+| php | `Hyperlight\call('math.add', 2, 3)` | throws `Hyperlight\HostException` |
 | wasmtime | an import: `add` of module `math` (core module), or `add` of an interface `ns:pkg/math` (component) | traps |
 
 - **Host function calls are synchronous.** The guest waits while your function runs on the thread driving the sandbox. In Python, only the thread running the code or guest function can make a host function call; others get a `RuntimeError`.
@@ -107,7 +109,7 @@ world calculator {
 
 ## JSON
 
-Guest code never sees JSON: it passes and gets native values (JavaScript values, Python objects, C# types, Java records and collections, WIT-typed values), and the driver converts. On the host, you work with the JSON text directly:
+Guest code never sees JSON: it passes and gets native values (JavaScript values, Python objects, C# types, Java records and collections, PHP arrays, WIT-typed values), and the driver converts. On the host, you work with the JSON text directly:
 
 - A host function receives its arguments as a JSON array, one element per argument: `host.call("math.add", 2, 3)` arrives as `[2,3]`, and a call with no arguments as `[]`.
 - It returns JSON text in `Ok` (`"5"`, `"\"hello\""`, `"{\"id\":7}"`), or an empty string for no value. Text that isn't JSON fails in the guest: the driver can't convert it.
@@ -149,8 +151,8 @@ Wasmtime 49 marks its 0.3 support as experimental, so treat it as such. Build a 
 
 | | hyperlight-js / hyperlight-wasm | here |
 |---|---|---|
-| Handlers, JSON in and out | `add_handler` + `handle_event` | `run` defines them, `call` calls them, in JavaScript, Python, C# and Java |
-| Host functions | `host:` modules; `env` or WIT imports | the same, plus `host.call`, Python's `hyperlight.call`, C#'s `Host.Call` and Java's `Host.call` |
+| Handlers, JSON in and out | `add_handler` + `handle_event` | `run` defines them, `call` calls them, in JavaScript, Python, C#, Java and PHP |
+| Host functions | `host:` modules; `env` or WIT imports | the same, plus `host.call`, Python's `hyperlight.call`, C#'s `Host.Call`, Java's `Host.call` and PHP's `Hyperlight\call` |
 | Wasm modules and components | `load_module` + `call_guest_function`; WIT world fixed when the host is built | any module or component, typed through JSON at run time |
 | WASI | a subset of preview 1 | preview 1, 0.2 and 0.3: files, clocks, random, sockets, environment, arguments |
 | Precompiled Wasm | required (`hyperlight-wasm-aot`) | optional: `.wasm` compiles in the guest, `.cwasm` loads as is |

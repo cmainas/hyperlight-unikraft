@@ -33,4 +33,4 @@ PATH=/tmp/hluk-rel:$PATH just site-record              # or: just site-record he
 
 Use a release build of `hluk` so the recordings show release image tags. Recording needs a Linux host with KVM, `asciinema` 2.x and `pv`; the `languages` scene needs Go and Rust, and `dockerfile` needs Docker and curl. Each scene runs in an empty cache, so first runs are real cold boots. A scene with a failing command keeps the committed cast.
 
-When a release adds or removes templates, update `UNRELEASED` in `app.js`. When Java ships in a release, add it back to the runtimes named in the hero and the Embed section of `index.html`.
+When a release adds or removes templates, update `UNRELEASED` in `app.js`. When Java ships in a release, add it back to the runtimes named in the hero and the Embed section of `index.html`; the same for PHP, which also takes guest function calls.

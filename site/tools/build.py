@@ -23,7 +23,7 @@ REPO = SITE.parent
 PUBLISHED = ["index.html", "style.css", "app.js", "hyperlight-logo.png", "casts"]
 # The file a template's project is about, in the order to look for it.
 MAIN_FILES = ["main.py", "main.js", "server.py", "server.js", "Program.cs", "main.go",
-              "src/main.rs", "main.c", "main.sh", "repl.sh", "main.ps1", "Main.java"]
+              "src/main.rs", "main.c", "main.sh", "repl.sh", "main.ps1", "Main.java", "main.php"]
 # Files shown next to the main one: how a project extends its rootfs.
 EXTRA_FILES = ["Dockerfile", "requirements.txt", "package.json"]
 

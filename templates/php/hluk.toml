@@ -1,0 +1,27 @@
+# hluk.toml -- the manifest for `{{name}}`. `hluk run` runs what it describes;
+# see docs/manifest.md in hyperlight-unikraft for every key.
+manifest_version = 1
+
+[app]
+name = "{{name}}"
+
+[rootfs]
+# The published php rootfs: PHP 8.5 with SQLite (PDO and SQLite3), mbstring,
+# DOM and the XML extensions, OpenSSL, sodium and zlib, pinned to the hluk
+# release that wrote this file. A php.ini in /usr/local/etc/php/conf.d/ of an
+# image built FROM it changes PHP's settings.
+image = "{{image}}"
+
+[run]
+script = "main.php"
+# Guest memory in MiB. The default is the size this runtime's image is
+# tested with (128 here); PHP's memory_limit, and the max_memory_limit
+# ini_set() can raise it to, are two thirds of what the guest has free, its
+# hard limit three quarters (a php.ini that raises memory_limit must raise
+# max_memory_limit too). Set it when the workload outgrows that.
+# scratch_mb = 128
+# Snapshot the booted guest (PHP up, driver parked) on the first
+# `hluk run` and restore it on the next ones.
+warm = true
+# mounts = ["./data:/mnt/data:ro"]
+# env = { GREETING = "hi" }

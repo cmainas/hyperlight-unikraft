@@ -298,6 +298,19 @@ fn java_clones_draw_their_own() {
     );
 }
 
+/// PHP's mt_rand and random_bytes, used before the snapshot (a seed code
+/// gave mt_srand() stays, tests/php.rs).
+#[test]
+fn php_clones_draw_their_own() {
+    let builder = SandboxBuilder::from_initrd(require_rootfs("php")).scratch_mb(128);
+    let outputs = two_clones(
+        builder,
+        Exec::Code("mt_rand(); random_bytes(4);".into()),
+        Exec::Code("echo mt_rand(), \"\\n\", bin2hex(random_bytes(8)), \"\\n\";".into()),
+    );
+    assert_each_line_differs(&outputs, &["mt_rand", "random_bytes"]);
+}
+
 /// QuickJS's Math.random, used before the snapshot.
 #[test]
 fn quickjs_clones_draw_their_own() {
