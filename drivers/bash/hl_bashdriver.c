@@ -53,10 +53,10 @@ static int g_pipe_from_sh = -1;  /* parent reads ack here */
 
 /*
  * The persistent hush child was spawned at boot and does not see the
- * parent's setenv(), so the dispatch script starts with an
+ * variables the parent sets, so the dispatch script starts with an
  * `export KEY='value'` line per host variable, the value single-quoted
  * so the shell takes it as it is.  A key the shell would not accept as
- * a name is left to setenv() alone.
+ * a name is set in the parent's environment alone.
  */
 static void bash_env_visitor(const char *key, const char *val, void *ctx)
 {
@@ -226,7 +226,7 @@ static int bash_dispatch(const uint8_t *fc, size_t fc_len)
 		}
 	}
 
-	/* Refresh env vars: setenv() here, export lines for the shell. */
+	/* Refresh env vars: set here, export lines for the shell. */
 	struct hl_strbuf env = { 0 };
 	hl_env_refresh(bash_env_visitor, &env);
 	if (env.err) {

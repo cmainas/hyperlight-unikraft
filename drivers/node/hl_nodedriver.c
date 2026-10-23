@@ -55,7 +55,7 @@ static int g_pipe_from_node = -1;  /* parent reads the status here */
 
 /*
  * The persistent Node child was spawned at boot and does not see the
- * parent's setenv(), so each call's code is prefixed with a
+ * variables the parent sets, so each call's code is prefixed with a
  * `process.env[<key>]=<value>;` line per host variable, key and value
  * as JSON string literals.
  */
@@ -438,7 +438,7 @@ static int node_dispatch(const uint8_t *fc, size_t fc_len)
 		code_len = sizeof(GX_LAUNCHER) - 1;
 	}
 
-	/* Refresh env vars: setenv() here, process.env lines for the child. */
+	/* Refresh env vars: set here, process.env lines for the child. */
 	hl_env_refresh(node_env_visitor, &env);
 	if (env.err) {
 		fprintf(stderr, "hl_nodedriver: out of memory for the environment\n");

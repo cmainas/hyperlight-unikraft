@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - `just conformance` now and then ran a module its skip list names (`known_failures.toml`, `CONFORMANCE_SKIP`), failing the job when it crashed (`test_regrtest` on Linux arm64): the skip-list check, a pipe into `grep -q`, could read an early exit of `grep` as a miss.
 - A snapshot could leave out part of a guest's memory: the kernel mapped each aligned 2 MiB of an `mmap`ed range (an ELF segment the elfloader maps, say) with one large page, which Hyperlight's snapshot drops, so a guest restored from it could fault there. The kernel now maps 4 KiB pages only, and `mmap(MAP_HUGETLB)` fails with `ENOMEM`, as on Linux without a hugepage pool.
+- The drivers set every host environment variable again at the top of every call, with `setenv()`, which on musl frees the string the variable had: code still holding it read freed memory (PHP's `putenv()` keeps the string it replaces, SQLite caches `getenv("TMPDIR")`). A variable is now set only when it changed, with `putenv()` and a string that stays.
 
 ## [v0.19.0]
 

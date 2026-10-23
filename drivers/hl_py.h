@@ -23,10 +23,10 @@
 
 /*
  * CPython copies the C environ into os.environ at startup and reads that
- * copy from then on, so setenv() alone is invisible to user code.  Each
- * host variable is set on os.environ through the C API: no source text,
- * so nothing to quote and no limit on count or length, and the user's
- * code keeps its own line numbers in tracebacks.
+ * copy from then on, so the C side's environ alone is invisible to user
+ * code.  Each host variable is set on os.environ through the C API: no
+ * source text, so nothing to quote and no limit on count or length, and
+ * the user's code keeps its own line numbers in tracebacks.
  */
 struct hl_py_env_ctx {
 	PyObject *environ;
@@ -59,7 +59,7 @@ static void hl_py_env_visitor(const char *key, const char *val, void *ctx)
 	if (!k || !v)
 		goto err;
 	/* A name the host takes over keeps the guest's value aside (os.environ
-	 * still has it: setenv() reached only the C side).  At the first
+	 * still has it: hl_env_refresh() reached only the C side).  At the first
 	 * refresh, made at boot (hl_py_serve()), a value equal to the host's
 	 * is the host's own, given at boot, not the guest's: taking it away
 	 * unsets it.  PATH is the exception: the driver set it itself. */
@@ -87,7 +87,7 @@ err:
 	Py_XDECREF(v);
 }
 
-/* Refresh the environment: setenv() for the C side, os.environ for
+/* Refresh the environment: the C side's environ, os.environ for
  * Python's.  The host sends its whole environment each time, so a name it
  * sent before and not now was taken away: it goes back to the guest's own
  * value, or from os.environ (and so from the C environ) if the guest had

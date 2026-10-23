@@ -55,8 +55,8 @@ static pid_t g_java_pid = -1;
 static int g_pipe_to_java = -1;    /* parent writes payload here */
 static int g_pipe_from_java = -1;  /* parent reads the status here */
 
-/* The JVM's environment: the driver's at boot.  hl_env_refresh() setenv()s
- * the host's variables into the driver for each call; a JVM started again
+/* The JVM's environment: the driver's at boot.  hl_env_refresh() sets
+ * the host's variables in the driver for each call; a JVM started again
  * after System.exit() must not take them as its own (LD_LIBRARY_PATH steers
  * the launcher, JAVA_TOOL_OPTIONS the JVM).  The dispatcher applies them per
  * call, as it does for the first JVM. */
@@ -71,8 +71,8 @@ extern char **environ;
 /* ── Environment visitor ───────────────────────────────────────── */
 
 /*
- * The persistent JVM was spawned at boot and does not see the parent's
- * setenv(), so each call carries the host's variables as KEY NUL VALUE
+ * The persistent JVM was spawned at boot and does not see the variables
+ * the parent sets, so each call carries the host's variables as KEY NUL VALUE
  * NUL pairs, which the child sets before the call runs.
  */
 static void java_env_visitor(const char *key, const char *val, void *ctx)
@@ -301,7 +301,7 @@ static int java_dispatch(const uint8_t *fc, size_t fc_len)
 			goto out;
 	}
 
-	/* Refresh env vars: setenv() here, KEY/VALUE pairs for the child. */
+	/* Refresh env vars: set here, KEY/VALUE pairs for the child. */
 	hl_env_refresh(java_env_visitor, &env);
 	if (env.err) {
 		fprintf(stderr, "hl_javadriver: out of memory for the environment\n");
