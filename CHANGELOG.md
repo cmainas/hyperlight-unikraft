@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - `just conformance` now and then ran a module its skip list names (`known_failures.toml`, `CONFORMANCE_SKIP`), failing the job when it crashed (`test_regrtest` on Linux arm64): the skip-list check, a pipe into `grep -q`, could read an early exit of `grep` as a miss.
+- A snapshot could leave out part of a guest's memory: the kernel mapped each aligned 2 MiB of an `mmap`ed range (an ELF segment the elfloader maps, say) with one large page, which Hyperlight's snapshot drops, so a guest restored from it could fault there. The kernel now maps 4 KiB pages only, and `mmap(MAP_HUGETLB)` fails with `ENOMEM`, as on Linux without a hugepage pool.
 
 ## [v0.19.0]
 
