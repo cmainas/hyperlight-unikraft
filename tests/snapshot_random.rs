@@ -208,6 +208,48 @@ fn go_and_rust_clones_draw_their_own() {
     }
 }
 
+/// The shell's $RANDOM, used before the snapshot, and a RANDOM the code
+/// made a variable of its own, which the reseed leaves alone.  The
+/// reseed keeps the code's line numbers.
+#[test]
+fn bash_clones_draw_their_own() {
+    let builder = SandboxBuilder::from_initrd(require_rootfs("bash")).scratch_mb(256);
+    let outputs = two_clones(
+        builder,
+        Exec::Code("echo $RANDOM >/dev/null".into()),
+        Exec::Code("echo $RANDOM$RANDOM".into()),
+    );
+    assert_each_line_differs(&outputs, &["$RANDOM"]);
+    let builder = SandboxBuilder::from_initrd(require_rootfs("bash")).scratch_mb(256);
+    let outputs = two_clones(
+        builder,
+        Exec::Code("export RANDOM=7".into()),
+        Exec::Code("echo $RANDOM $LINENO".into()),
+    );
+    assert_eq!(outputs, ["7 1\n", "7 1\n"].map(String::from));
+
+    // A first call that does not parse still finds $RANDOM reseeded.
+    let snap_dir = temp_dir("snapshot-random-bash");
+    let mut sandbox = SandboxBuilder::from_initrd(require_rootfs("bash"))
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox.run("echo $RANDOM >/dev/null").unwrap();
+    sandbox.snapshot_to(&snap_dir).unwrap();
+    drop(sandbox);
+    let draws = [0, 1].map(|_| {
+        let mut clone = SandboxBuilder::from_snapshot_dir(&snap_dir)
+            .unwrap()
+            .boot()
+            .unwrap();
+        let _ = clone.run("echo \"unterminated");
+        clone.drain_output();
+        clone.run("echo $RANDOM$RANDOM").unwrap();
+        clone.drain_output()
+    });
+    assert_ne!(draws[0], draws[1], "two clones drew the same: {draws:?}");
+}
+
 /// Math.random, new Random(), ThreadLocalRandom, SplittableRandom,
 /// RandomGenerator.getDefault(), Collections.shuffle, UUID.randomUUID and
 /// the seeders every DRBG and SHA1PRNG draw from, each used before the

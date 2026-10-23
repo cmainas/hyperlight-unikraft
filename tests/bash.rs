@@ -353,6 +353,32 @@ fn bash_refuses_a_call() {
     // The driver serves the next call as usual.
     sandbox.run("echo still-here").unwrap();
 }
+
+/// Assigning RANDOM seeds $RANDOM, as in bash: a seed repeats its
+/// sequence, and RANDOM stays the generator's, not a plain variable,
+/// until export makes it one.  A subshell seeds its own from the kernel.
+#[test]
+fn bash_random_assignment_seeds() {
+    let mut sandbox = SandboxBuilder::from_initrd(require_rootfs("bash"))
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            "RANDOM=42; a=\"$RANDOM $RANDOM\"; RANDOM=42; b=\"$RANDOM $RANDOM\"\n\
+             [ \"$a\" = \"$b\" ] && echo repeats\n\
+             [ \"$RANDOM$RANDOM$RANDOM\" != 424242 ] && echo generated\n\
+             a=$(echo $RANDOM$RANDOM); b=$(echo $RANDOM$RANDOM); [ \"$a\" != \"$b\" ] && echo subshells\n\
+             f() { local RANDOM=5; echo \"local $(echo $RANDOM)\"; }; f\n\
+             export RANDOM=7; RANDOM=8; [ \"$RANDOM$RANDOM\" = 88 ] && echo variable",
+        )
+        .unwrap();
+    assert_eq!(
+        sandbox.drain_output(),
+        "repeats\ngenerated\nsubshells\nlocal 5\nvariable\n"
+    );
+}
+
 /// An empty argument or environment string reaches a program, as on
 /// Linux: hush passes them when it re-executes itself for a pipeline.
 #[test]

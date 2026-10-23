@@ -1,0 +1,77 @@
+--- a/shell/hush.c
++++ b/shell/hush.c
+@@ -2319,6 +2319,11 @@
+ #define SETFLAG_UNEXPORT (1 << 1)
+ #define SETFLAG_MAKE_RO  (1 << 2)
+ #define SETFLAG_VARLVL_SHIFT   3
++#if ENABLE_HUSH_RANDOM_SUPPORT
++/* Set while a re-executed child takes its parent's variables (-V): an
++ * inherited RANDOM is a variable, not a seed. */
++static smallint setting_inherited_var;
++#endif
+ static int set_local_var(char *str, unsigned flags)
+ {
+ 	struct variable **cur_pp;
+@@ -2333,6 +2338,24 @@
+ 	if (HUSH_DEBUG && !eq_sign)
+ 		bb_simple_error_msg_and_die("BUG in setvar");
+ 
++#if ENABLE_HUSH_RANDOM_SUPPORT
++	/* bash compat: a plain assignment to RANDOM seeds the generator, and
++	 * $RANDOM stays the generator's rather than becoming a variable.
++	 * export, local, readonly and a command's prefix assignment (flags)
++	 * still make one, and once there is one it is assigned as any. */
++	if (flags == 0 && !setting_inherited_var
++	 && eq_sign - str == 6 && strncmp(str, "RANDOM", 6) == 0
++	 && !get_ptr_to_local_var("RANDOM", 6)
++	) {
++		unsigned long long seed = strtoull(eq_sign + 1, NULL, 10);
++		uint32_t lo = (uint32_t)seed;
++
++		INIT_RANDOM_T(&G.random_gen, lo ? lo : 1, (uint32_t)(seed >> 32));
++		free(str);
++		return 0;
++	}
++#endif
++
+ 	name_len = eq_sign - str + 1; /* including '=' */
+ 	cur_pp = &G.top_var;
+ 	while ((cur = *cur_pp) != NULL) {
+@@ -10469,7 +10492,9 @@
+ 		}
+ 		case 'R':
+ 		case 'V':
++			IF_HUSH_RANDOM_SUPPORT(setting_inherited_var = 1;)
+ 			set_local_var(xstrdup(optarg), opt == 'R' ? SETFLAG_MAKE_RO : 0);
++			IF_HUSH_RANDOM_SUPPORT(setting_inherited_var = 0;)
+ 			break;
+ # if ENABLE_HUSH_FUNCTIONS
+ 		case 'F': {
+--- a/shell/random.c
++++ b/shell/random.c
+@@ -17,6 +17,7 @@
+ 
+ # include "libbb.h"
+ # include "random.h"
++# include <sys/random.h>
+ # define RAND_BASH_MASK 0x7fff
+ 
+ #else
+@@ -55,6 +56,17 @@
+ 	uint32_t t;
+ 
+ 	if (UNINITED_RANDOM_T(rnd)) {
++#if !defined RANDTEST
++		/* The kernel's generator first: the pid and the clock repeat
++		 * across machines started alike (VMs restored from one
++		 * snapshot), and so would $RANDOM.
++		 */
++		uint32_t seed[2];
++
++		if (getrandom(seed, sizeof(seed), 0) == sizeof(seed)) {
++			INIT_RANDOM_T(rnd, seed[0] ? seed[0] : 1, seed[1]);
++		} else
++#endif
+ 		/* Can use monotonic_ns() for better randomness but for now
+ 		 * it is not used anywhere else in busybox... so avoid bloat
+ 		 */
