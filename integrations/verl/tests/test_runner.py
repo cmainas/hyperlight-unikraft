@@ -489,8 +489,8 @@ URL = "hyperlight://" + (os.path.abspath(os.environ["HLUK_INITRD"]) if os.getenv
 
 
 # The memory tests' run timeout: on the Linux arm64 runners (VMs on Apple silicon, so nested
-# virtualization) the guest's first touch of each page is many times slower. Touching 900 MiB
-# outran a 30 s timeout there, and filling a 405 MiB guest a 10 s one; on x86 both take 1-3 s.
+# virtualization) the guest's first touch of each page is many times slower: filling a 405 MiB
+# guest took over 10 s there, where x86 takes under 1 s, so these get several times that.
 MEMORY_TEST_TIMEOUT = 120
 
 
@@ -812,12 +812,34 @@ except OSError:
     assert score == 1.0, metadata
 
 
+def _host_memory_available_mb():
+    try:
+        with open("/proc/meminfo") as f:
+            return next(int(line.split()[1]) >> 10 for line in f if line.startswith("MemAvailable:"))
+    except (OSError, StopIteration, ValueError):
+        return 0
+
+
 @needs_hluk
-def test_real_memory_limit_is_the_solutions():
+@pytest.mark.parametrize(
+    "solution_mb, memory_limit_mb",
+    [
+        (340, 384),
+        # Sandbox Fusion's usual limit, in a 1.4 GB guest: only where the host can back it beside
+        # the test run, which the Linux arm64 runners (3 GB VMs) cannot
+        pytest.param(
+            900,
+            1024,
+            marks=pytest.mark.skipif(_host_memory_available_mb() < 3072, reason="needs 3 GiB of free host memory"),
+        ),
+    ],
+)
+def test_real_memory_limit_is_the_solutions(solution_mb, memory_limit_mb):
     # memory_limit_mb is what the solution may allocate, as under Sandbox Fusion, not the VM's
-    # whole memory, which also holds the guest's kernel and interpreter.
-    code = "x = bytearray(900 << 20)\nx[::4096] = b'\\x01' * len(x[::4096])\nprint('ok')"
-    response, error = run_case(URL, code, None, MEMORY_TEST_TIMEOUT, 1024)
+    # whole memory, which also holds the guest's kernel and interpreter: in a guest only the size
+    # of the limit, the solution would run out of memory (even 300 MiB does in a 405 MiB guest)
+    code = f"x = bytearray({solution_mb} << 20)\nx[::4096] = b'\\x01' * len(x[::4096])\nprint('ok')"
+    response, error = run_case(URL, code, None, MEMORY_TEST_TIMEOUT, memory_limit_mb)
     why = _why(response, error)
     assert response and response["run_result"], why
     assert response["status"] == "Success" and response["run_result"]["stdout"] == "ok\n", why
