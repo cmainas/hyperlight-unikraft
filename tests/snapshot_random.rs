@@ -298,6 +298,18 @@ fn java_clones_draw_their_own() {
     );
 }
 
+/// QuickJS's Math.random, used before the snapshot.
+#[test]
+fn quickjs_clones_draw_their_own() {
+    let builder = SandboxBuilder::from_initrd(require_rootfs("quickjs")).scratch_mb(64);
+    let outputs = two_clones(
+        builder,
+        Exec::Code("Math.random();".into()),
+        Exec::Code("console.log(Math.random());".into()),
+    );
+    assert_each_line_differs(&outputs, &["Math.random"]);
+}
+
 /// Random.Shared, new Random(), RandomNumberGenerator (OpenSSL's),
 /// Guid.NewGuid and RandomNumberGenerator.GetInt32, each used before the
 /// snapshot.
