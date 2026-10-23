@@ -1,0 +1,530 @@
+name: arm64 jobs
+
+# arm64.yml's jobs, which its one job calls, so that a run it skips (a
+# pull request without ci/arm64, or another label added) shows one skipped
+# check rather than one per job.  arm64.yml says what runs when.
+on:
+  workflow_call:
+    inputs:
+      weekly:
+        type: boolean
+        default: false
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Within what arm64.yml's job grants, which a called job cannot exceed.
+permissions:
+  contents: read
+
+jobs:
+  # What this run tests, for the other jobs, which a matrix can learn only
+  # from another job's outputs:
+  # - scope: change (tier 2), nightly or weekly (tier 3; weekly is Sunday's
+  #   nightly, or one started by hand with `weekly`), or cache (a push to
+  #   main: the guest images' cache alone, for the next pull requests);
+  # - hosts: the hosts' names, Linux in tier 3 only, none for cache;
+  # - linux, macos, windows: each host's runner labels, as a JSON array for
+  #   format() to fill the 1ES pool's JobId label in, which must be unique
+  #   to each job.
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read    # this run's start
+    timeout-minutes: 5
+    outputs:
+      scope: ${{ steps.plan.outputs.scope }}
+      hosts: ${{ steps.plan.outputs.hosts }}
+      linux: '["self-hosted", "Linux", "arm64", "kvm"]'
+      macos: '["self-hosted", "macos", "arm64", "hvf"]'
+      # As in hyperlight's dep_build_test.yml.
+      windows: '["self-hosted", "Windows", "ARM64", "1ES.Pool=hl-windows-arm", "JobId={0}"]'
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          WEEKLY: ${{ inputs.weekly }}
+        # Sunday as of the run's start, not this job's: re-run on a Monday,
+        # Sunday's run is still the weekly one.
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            scope=change
+          elif [ "$EVENT" = push ]; then
+            scope=cache
+          elif [ "$WEEKLY" = true ]; then
+            scope=weekly
+          elif [ "$EVENT" = schedule ]; then
+            started=$(gh api "repos/$GH_REPO/actions/runs/$RUN" -q .created_at) || exit 1
+            [ "$(date -u -d "$started" +%u)" = 7 ] && scope=weekly || scope=nightly
+          else
+            scope=nightly
+          fi
+          if [ "$scope" = cache ]; then
+            hosts='[]'
+          elif [ "$scope" = change ]; then
+            hosts='["macos", "windows"]'
+          else
+            hosts='["linux", "macos", "windows"]'
+          fi
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "hosts=$hosts" >> "$GITHUB_OUTPUT"
+          echo "Scope: $scope, on $hosts"
+
+  rootfs-arm64:
+    needs: plan
+    # Per job, not per workflow: a run whose jobs are skipped (another label
+    # added) must not cancel one that is testing.  Each nightly run's groups
+    # are its own: neither a run started by hand nor the next nightly cancels
+    # its jobs, or its re-run's (ci-report.yml).  A push's are apart from
+    # a run started by hand on main.
+    concurrency:
+      group: arm64-rootfs-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id || github.event_name == 'push' && 'cache' }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      - name: Cache key
+        id: key
+        # "muslaot": the .NET AOT test programs moved to a musl toolchain,
+        # invalidating earlier entries.  The inputs are ci.yml's rootfs
+        # job's: the same images, conformance and demos included.
+        run: echo "key=rootfs-arm64-muslaot-${{ hashFiles('rust-toolchain.toml', 'drivers/**', 'conformance/python/**', 'examples/agent/custom/Dockerfile', 'examples/c/**', 'examples/rust/**', 'examples/go/**', 'examples/wasmtime/**', 'examples/dotnet-aot/**', 'examples/autonomous/**', 'examples/http-server/**', 'examples/agent-framework/local.Dockerfile', 'demos/pptx-gen/Dockerfile.rootfs') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache guest images and test binaries
+        id: rootfs-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build-elfloader
+          key: ${{ steps.key.outputs.key }}
+          # Saved on Linux, restored on macOS too.
+          enableCrossOsArchive: true
+          # A push to main's run only saves the images, when missing
+          lookup-only: ${{ needs.plan.outputs.scope == 'cache' }}
+
+      - name: Install cpio
+        if: steps.rootfs-cache.outputs.cache-hit != 'true'
+        run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends cpio
+
+      - name: Install .NET SDK
+        if: steps.rootfs-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Install Go
+        if: steps.rootfs-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.24"
+          cache: false
+
+      - name: Build rootfs images, conformance image and test binaries
+        if: steps.rootfs-cache.outputs.cache-hit != 'true'
+        run: |
+          just build-all-rootfs
+          just build-conformance python
+          just build-test-bins
+          just build-demos
+
+      # For the test jobs: an artifact, since a macOS runner cannot restore
+      # a cache entry Linux saved without zstd, which the self-hosted Macs
+      # lack.
+      - name: Hand the images to the test jobs
+        if: needs.plan.outputs.scope != 'cache'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rootfs-arm64
+          path: build-elfloader
+          # As long as ci-report.yml may re-run the jobs that use it
+          retention-days: 3
+          if-no-files-found: error
+
+  # The Linux release binary is a static musl build, which nothing else on
+  # arm64 boots a guest with: built here, booted by static-boot-arm64, on
+  # the Linux runner, so in tier 3 only.
+  static-arm64:
+    needs: plan
+    if: needs.plan.outputs.scope == 'nightly' || needs.plan.outputs.scope == 'weekly'
+    concurrency:
+      group: arm64-static-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
+      cancel-in-progress: true
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: musl toolchain
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+          rustup toolchain install
+          rustup target add aarch64-unknown-linux-musl
+
+      - name: Build hluk (static)
+        run: cargo build --release --locked --target aarch64-unknown-linux-musl
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hluk-static-arm64
+          path: target/aarch64-unknown-linux-musl/release/hluk
+          # As long as ci-report.yml may re-run the jobs that use it
+          retention-days: 3
+          if-no-files-found: error
+
+  # The hosts come from the plan job, and so does each one's runner: an
+  # include naming Linux would add a job of its own when the plan leaves
+  # Linux out.
+  test-arm64:
+    name: test (${{ matrix.os }}-arm64)
+    needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
+    concurrency:
+      group: arm64-test-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
+      cancel-in-progress: true
+    runs-on: ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('test-arm64-{0}-{1}-{2}', matrix.os, github.run_id, github.run_attempt))) }}
+    timeout-minutes: ${{ needs.plan.outputs.scope != 'change' && 360 || 60 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
+    env:
+      # Linux runs the suites with small guests but on Sundays (see the top
+      # of arm64.yml); macOS and Windows run all the targets, always.
+      SMALL_GUESTS: >-
+        --lib --bins --test bash --test cli --test compiled --test fs_backend
+        --test native_kernel --test networking --test project
+        --test python --test python_shell --test quickjs --test resolv
+        --test snapshot_mounts --test step --test wasmtime
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+
+      # On macOS, cargo signs each test binary with the hypervisor
+      # entitlement first and runs its tests one at a time
+      # (dev/macos-sign-and-run.sh); in parallel, the Linux runner's nested
+      # guests ran past the hour.  On Windows, a small pool of WHP
+      # surrogate processes, spawned when needed, as `just test` sets up;
+      # the other hosts ignore those variables.  On Windows, as many tests at
+      # a time as `just test` runs there.
+      - name: cargo test
+        run: >-
+          cargo test --locked ${{ matrix.os == 'linux' && needs.plan.outputs.scope != 'weekly' && env.SMALL_GUESTS
+          || '--all-targets' }}
+        env:
+          RUST_TEST_THREADS: ${{ matrix.os == 'windows' && 4 || 1 }}
+          HYPERLIGHT_MAX_SURROGATES: 8
+          HYPERLIGHT_INITIAL_SURROGATES: 0
+
+  # The static hluk static-arm64 built, booting a guest on the KVM runner.
+  static-boot-arm64:
+    name: static (linux-arm64)
+    needs: [plan, rootfs-arm64, static-arm64]
+    concurrency:
+      group: arm64-static-boot-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
+      cancel-in-progress: true
+    runs-on: ${{ fromJSON(needs.plan.outputs.linux) }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch guest images
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rootfs-arm64
+          path: build-elfloader
+
+      - name: Fetch the static hluk
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hluk-static-arm64
+          path: static
+
+      - name: Boot a guest
+        run: |
+          chmod +x static/hluk
+          file static/hluk | grep -Eq 'static(ally|-pie) linked' || { file static/hluk; exit 1; }
+          static/hluk run --initrd build-elfloader/python-rootfs.cpio examples/python/hello.py
+
+  # ci.yml's demos, on each arm64 host: one job per host rather than per
+  # demo, as these runners are few.  Every demo runs; the job fails after
+  # them if any did.
+  demos-arm64:
+    name: demos (${{ matrix.os }}-arm64)
+    needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
+    concurrency:
+      group: arm64-demos-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
+      cancel-in-progress: true
+    runs-on: ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('demos-arm64-{0}-{1}-{2}', matrix.os, github.run_id, github.run_attempt))) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+        with:
+          python-version: "3.12"
+
+      - name: Build hluk
+        run: cargo build --release --locked
+
+      # Hypervisor.framework serves only a binary with its entitlement.
+      - name: Sign hluk
+        if: runner.os == 'macOS'
+        run: codesign -f -s - --entitlements dev/macos-entitlements.plist target/release/hluk
+
+      # ci/run_demo.py, as `just demos` runs it on each host.
+      - name: Run the demos
+        shell: bash
+        run: |
+          failed=
+          for demo in supply-chain autonomous http-flask http-express http-kestrel pptx agent-fw-local; do
+            echo "::group::$demo"
+            python ci/run_demo.py "$demo" || failed="$failed $demo"
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::Demos failed:$failed"
+            exit 1
+          fi
+
+  # ci.yml's integrations job, on each arm64 host.
+  integrations-arm64:
+    name: ${{ matrix.package }} (${{ matrix.os }}-arm64, ${{ matrix.deps }} ${{ matrix.package }}, Python ${{ matrix.python }})
+    needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
+    concurrency:
+      group: arm64-${{ matrix.package }}-${{ matrix.deps }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
+      cancel-in-progress: true
+    runs-on: >-
+      ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('integrations-arm64-{0}-{1}-{2}-{3}-{4}',
+      matrix.package, matrix.deps, matrix.os, github.run_id, github.run_attempt))) }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [smolagents, mcp, verl]
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
+        deps: [oldest, newest]
+        # verl runs on Linux only
+        exclude:
+          - package: verl
+            os: macos
+          - package: verl
+            os: windows
+        include:
+          - deps: oldest
+            python: "3.10"
+          - deps: newest
+            python: "3.12"
+    # As ci.yml's integrations job sets them
+    env:
+      FLOORS: >-
+        ${{ matrix.package == 'mcp' && 'mcp smolagents-hyperlight smolagents anyio pydantic rich'
+        || matrix.package == 'verl' && 'filelock' || 'smolagents' }}
+      REQUIRES: ${{ matrix.package == 'mcp' && matrix.deps == 'newest' && '-e ../smolagents' || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Build hluk
+        run: cargo build --release --locked
+
+      # Hypervisor.framework serves only a binary with its entitlement.
+      - name: Sign hluk
+        if: runner.os == 'macOS'
+        run: codesign -f -s - --entitlements dev/macos-entitlements.plist target/release/hluk
+
+      - name: Install the package
+        working-directory: integrations/${{ matrix.package }}
+        run: |
+          # shellcheck disable=SC2086 # empty, or an option and its value
+          python -m pip install $REQUIRES -e '.[test]'
+          if [ "${{ matrix.deps }}" = oldest ]; then
+            pins=
+            for library in $FLOORS; do
+              oldest=$(sed -n "s/.*\"$library>=\([0-9.]*\),.*/\1/p" pyproject.toml)
+              if [ -z "$oldest" ]; then
+                echo "::error::pyproject.toml gives $library no floor"
+                exit 1
+              fi
+              pins="$pins $library==$oldest"
+            done
+            python -m pip install $pins
+          fi
+          for library in $FLOORS; do
+            echo "$library $(python -m pip show "$library" | sed -n 's/^Version: //p')"
+          done
+
+      - name: Test
+        working-directory: integrations/${{ matrix.package }}
+        env:
+          RUN_ALL: "1"
+          HLUK_PATH: ${{ github.workspace }}/target/release/hluk${{ runner.os == 'Windows' && '.exe' || '' }}
+          # verl-hyperlight's tests run the python image; the others' the agent image, at the memory it needs
+          HLUK_INITRD: ${{ github.workspace }}/build-elfloader/${{ matrix.package == 'verl' && 'python' || 'agent' }}-rootfs.cpio
+          HLUK_SCRATCH_MB: "1536"
+        run: python -m pytest -v
+
+  # ci.yml's clickhouse job on Linux arm64, with ClickHouse's arm64 build:
+  # tier 3 only, with the Linux runner.
+  clickhouse-arm64:
+    name: clickhouse (linux-arm64)
+    needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope == 'nightly' || needs.plan.outputs.scope == 'weekly'
+    concurrency:
+      group: arm64-clickhouse-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
+      cancel-in-progress: true
+    runs-on: ${{ fromJSON(needs.plan.outputs.linux) }}
+    timeout-minutes: 45
+    env:
+      CLICKHOUSE_VERSION: 26.9.22.3
+      CLICKHOUSE_SHA512: baa0ef9cab6ebeb5adbceca05dfaa449ed4ae4757a3320fbe2c0466174ce01c9137cc8d0e7a88f8c8711045f885d9d8dbd5a1794db26dff85c8eb1ecdc88995a
+    defaults:
+      run:
+        working-directory: integrations/clickhouse
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+
+      - name: Download ClickHouse
+        run: |
+          tarball="clickhouse-common-static-$CLICKHOUSE_VERSION-arm64.tgz"
+          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
+            "https://github.com/ClickHouse/ClickHouse/releases/download/v$CLICKHOUSE_VERSION-stable/$tarball"
+          echo "$CLICKHOUSE_SHA512  $RUNNER_TEMP/$tarball" | sha512sum -c -
+          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP"
+          echo "CLICKHOUSE_BINARY=$RUNNER_TEMP/clickhouse-common-static-$CLICKHOUSE_VERSION/usr/bin/clickhouse" >> "$GITHUB_ENV"
+
+      - name: Test
+        env:
+          CLICKHOUSE_HYPERLIGHT_INITRD: ${{ github.workspace }}/build-elfloader/python-rootfs.cpio
+        run: cargo test --release
+
+  # ci.yml's conformance job, on each arm64 host.
+  conformance-arm64:
+    name: conformance (${{ matrix.os }}-arm64)
+    needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
+    concurrency:
+      group: arm64-conformance-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
+      cancel-in-progress: true
+    runs-on: ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('conformance-arm64-{0}-{1}-{2}', matrix.os, github.run_id, github.run_attempt))) }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      # On Windows, without test_urllib2net: the 1ES pool's outbound NAT
+      # gives an FTP data connection another address than its control
+      # connection, which www.pythontest.net refuses (425 Bad IP
+      # connecting), from the host as from a guest.
+      - name: Run CPython conformance suite
+        shell: bash
+        env:
+          CONFORMANCE_SKIP: ${{ matrix.os == 'windows' && 'test_urllib2net' || '' }}
+        run: |
+          set -o pipefail
+          just conformance python 2>&1 | tee conformance-output.txt
+
+  # ci.yml's bench job, on each arm64 host, with its own history and
+  # ceilings ("<os>-arm64" in benchmarks/limits.json).
+  bench-arm64:
+    name: "bench (${{ matrix.os }}-arm64, ${{ matrix.runtime }})"
+    needs: [plan, rootfs-arm64]
+    if: needs.plan.outputs.scope != 'cache'
+    concurrency:
+      group: arm64-bench-${{ matrix.runtime }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'schedule' && github.run_id }}
+      cancel-in-progress: true
+    runs-on: >-
+      ${{ fromJSON(format(needs.plan.outputs[matrix.os], format('bench-arm64-{0}-{1}-{2}-{3}',
+      matrix.runtime, matrix.os, github.run_id, github.run_attempt))) }}
+    permissions:
+      contents: write   # push to gh-pages
+    # 25 of them for the gate's second measurement (benchmarks/gate.sh).
+    timeout-minutes: ${{ needs.plan.outputs.scope != 'change' && 265 || 85 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.hosts) }}
+        runtime: [python, python-shell, agent]
+        # agent only in tier 3, and on Linux only on Sundays (see the top of
+        # arm64.yml).
+        exclude:
+          - runtime: ${{ needs.plan.outputs.scope == 'change' && 'agent' || '' }}
+          - os: ${{ needs.plan.outputs.scope != 'weekly' && 'linux' || '' }}
+            runtime: agent
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/arm64-host
+        with:
+          python-version: '3.12'
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      - name: Run benchmarks
+        id: bench
+        shell: bash
+        run: just bench ${{ matrix.runtime }}
+
+      # The gate: benchmarks/gate.sh, which measures a timing over its
+      # ceiling again before it fails on it. A hang in that second run times
+      # out this step rather than the job, so Store still charts the first.
+      - name: Check ceilings
+        shell: bash
+        timeout-minutes: 25
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+          HOST: ${{ matrix.os }}-arm64
+        run: bash benchmarks/gate.sh "$RUNTIME" "$HOST"
+
+      # Without the Macs' system credential helper, osxkeychain, which hangs
+      # this action's fetch of gh-pages (a token in the URL) until the job
+      # times out; the same fetch without it takes a second.
+      - name: Store benchmark results
+        if: ${{ !cancelled() && steps.bench.outcome == 'success' }}
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: ""
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          name: ${{ matrix.runtime }} benchmarks
+          tool: customSmallerIsBetter
+          output-file-path: bench-results.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          benchmark-data-dir-path: dev/bench/${{ matrix.os }}-arm64/${{ matrix.runtime }}
+          # A re-run's too, when attempt 1 charted nothing: one after a
+          # failed gate charts the commit twice.
+          auto-push: ${{ github.event_name == 'schedule' }}
+          summary-always: true
+          fail-on-alert: false
+          alert-threshold: '200%'
+          comment-on-alert: false

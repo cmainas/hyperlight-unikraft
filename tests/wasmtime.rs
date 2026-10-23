@@ -100,9 +100,17 @@ fn wasmtime_runs_wasi_modules_and_components_from_a_mount() {
         assert_eq!(written.trim(), "3", "{program}");
         std::fs::remove_file(data.path().join("output.txt")).unwrap();
 
-        // A non-zero exit fails the call: the module's own code, the
-        // component's 1 (WASI 0.2's exit carries only success or failure).
-        let want = if program.ends_with("p1.wasm") { 3 } else { 1 };
+        // A non-zero exit fails the call: the module's own code, and the
+        // component's when its std exits with exit-with-code (WASI 0.2.12),
+        // as Rust's does from 1.100; before, it exits with exit, which
+        // carries only failure: 1.  Read from the program itself, whichever
+        // compiler built it.
+        let own_code = program.ends_with("p1.wasm")
+            || std::fs::read(require_bins("wasmtime").join(program))
+                .unwrap()
+                .windows(14)
+                .any(|name| name == b"exit-with-code");
+        let want = if own_code { 3 } else { 1 };
         match sandbox.run(Exec::Guest(format!("{BIN_MOUNT}/{program} fail"))) {
             Err(Error::CallFailed { status }) => assert_eq!(status, want, "{program}"),
             other => panic!("{program}: expected a failed call, got {other:?}"),

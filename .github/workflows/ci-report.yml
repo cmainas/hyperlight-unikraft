@@ -1,0 +1,293 @@
+name: CI report
+
+# The reporter of failures on main (docs/ci.md): the nightly arm64 run's,
+# and those of the CI and arm64 runs of a push to main.  A failed run is
+# re-run once, its failed jobs only; a job that fails again gets an issue,
+# one per job (labelled ci/nightly for the nightly run, ci/main for a push),
+# which each later run it fails in comments on while it is open.  A job that
+# reaches its timeout fails; one cancelled by hand, or by a newer run, does
+# not.  A run that does not start (GitHub refused the workflow file) gets an
+# issue at once.  Of a push's runs, the newest of each workflow alone is
+# re-run, and an older one reported once it failed again.  This runs when
+# such a run completes and every two hours as well: GitHub starts no
+# workflow for most of what GITHUB_TOKEN does, so the end of a re-run asked
+# for here may start none.  Each pass looks at the runs that ended in the
+# last two days, and acts on each attempt once: a run being re-run is not
+# completed, and a report carries a marker naming its run and attempt,
+# looked for in closed issues too.
+on:
+  workflow_run:
+    workflows: [arm64, CI]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "41 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write    # re-run a failed run
+  checks: read      # a job's annotations: whether it timed out
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    # Only the end of a nightly run, or of a push's: not of a pull request's
+    # run, or of one started by hand.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'push'
+    # One pass at a time, so that two never file the same report.  On the
+    # job, after its `if`, so that a pull request's run, which skips it,
+    # never replaces a pass waiting here.
+    concurrency:
+      group: ci-report
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Re-run or report failed runs on main
+        run: |
+          # Not bash -e, GitHub's default: one run or job that fails to be
+          # handled is warned of, and the next pass tries it again.
+          set +e -uo pipefail
+          status=0
+
+          # Whether an issue titled $1 has the report $2: 0 if so, 1 if not, 2
+          # if that cannot be told.
+          reported() {
+            local issue thread
+            for issue in $(jq -r --arg t "$1" '.[] | select(.title == $t) | .number' <<< "$issues"); do
+              thread=$(gh issue view "$issue" --json body,comments) || return 2
+              jq -e --arg m "$2" '[.body, .comments[].body] | any(contains($m))' <<< "$thread" >/dev/null && return 0
+            done
+            return 1
+          }
+          # One report of one run's attempt: an issue titled $1, labelled
+          # $label, or a comment on the open one, unless an issue, open or
+          # closed, has it already.  $issues lists those labelled $label, once
+          # per sweep, and the ones the sweep creates.
+          report() {
+            local title=$1 marker=$2 body=$3 same open created more
+            reported "$title" "$marker"
+            case $? in 0) return 0 ;; 2) return 1 ;; esac
+            same=$(jq -c --arg t "$title" '[.[] | select(.title == $t)]' <<< "$issues")
+            open=$(jq -r 'first(.[] | select(.state == "OPEN") | .number) // empty' <<< "$same")
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body "$marker"$'\n'"$body"
+            else
+              created=$(gh issue create --title "$title" --label "$label" --body "$marker"$'\n'"$body") || return 1
+              # For the next reports of this pass; gh prints the new issue's URL
+              if more=$(jq -c --argjson n "${created##*/}" --arg t "$title" \
+                          '. + [{number: $n, title: $t, state: "OPEN"}]' <<< "$issues"); then
+                issues=$more
+              fi
+            fi
+          }
+
+          # The end of a job's log, up to its first error, without timestamps
+          # or colors, or its annotations when it has no log (a runner that
+          # lost contact leaves none).  No backticks, so that the log cannot
+          # close the code block.
+          excerpt() {
+            local text
+            # gh api prints an error's JSON body on stdout: none of that
+            text=$(gh api "repos/$GH_REPO/actions/jobs/$1/logs" 2>/dev/null) || text=
+            text=$(sed -E -e 's/^[0-9]{4}-[0-9-]+T[0-9:.]+Z //' -e 's/\x1b\[[0-9;]*m//g' <<< "$text" |
+                     awk '{ lines[NR] = $0 } /##\[error\]/ && !first { first = NR }
+                          END { last = first ? first + 2 : NR; if (last > NR) last = NR
+                                for (i = (last > 40 ? last - 39 : 1); i <= last; i++) print lines[i] }')
+            if [ -z "$text" ]; then
+              text=$(gh api "repos/$GH_REPO/check-runs/$1/annotations" -q '.[].message') || text=
+            fi
+            tr '`' "'" <<< "${text:-no log}" | tail -c 6000
+          }
+
+          # The failed runs of workflow $1 for event $2 on main: $3 names one
+          # in a report, $4 starts the titles, $5 is the label, $6 the files
+          # GitHub may refuse.  Of a push's runs, the newest alone is re-run:
+          # an older commit's re-run would cancel the newer one's in the
+          # workflow's concurrency groups, and its failures may be fixed
+          # already.  An older one is reported only once it failed again.
+          sweep() {
+            local file=$1 event=$2 what=$3 prefix=$4 files=$6 runs run attempt sha conclusion url
+            local newest total jobs failed by_hand gate unknown job job_conclusion name job_url runner notes marker seen now body
+            label=$5
+            if ! issues=$(gh issue list --state all --label "$label" --limit 500 --json number,title,state); then
+              echo "::warning::Could not list the issues labelled $label"
+              status=1
+              return
+            fi
+            if ! runs=$(gh api -X GET "repos/$GH_REPO/actions/workflows/$file/runs" \
+                     -f event="$event" -f branch=main -f per_page=30 \
+                     -q '.workflow_runs[] | select(.status == "completed")
+                         | select(.updated_at >= "'"$since"'")
+                         | select(.conclusion | IN("failure", "timed_out", "cancelled", "startup_failure"))
+                         | "\(.id) \(.run_attempt) \(.head_sha) \(.conclusion)"'); then
+              echo "::warning::Could not list the $file runs of $event events"
+              status=1
+              return
+            fi
+            # Of a push's runs, one that is not the newest and has not been
+            # re-run is left at once: it can be neither re-run nor reported
+            newest=
+            if [ "$event" = push ] && ! newest=$(gh api -X GET "repos/$GH_REPO/actions/workflows/$file/runs" \
+                                                   -f event=push -f branch=main -f per_page=1 -q '.workflow_runs[0].id'); then
+              echo "::warning::Could not read the newest $file run of a push"
+              status=1
+              return
+            fi
+            while read -r run attempt sha conclusion; do
+              [ -n "$run" ] || continue
+              [ -z "$newest" ] || [ "$attempt" != 1 ] || [ "$run" = "$newest" ] || continue
+              url="https://github.com/$GH_REPO/actions/runs/$run"
+              # A workflow file GitHub refused, the run's own (startup_failure)
+              # or one it calls, such as a reusable workflow (a failure with no
+              # job): no job ran, and none would again
+              total=
+              if [ "$conclusion" = failure ] &&
+                 ! total=$(gh api "repos/$GH_REPO/actions/runs/$run/attempts/$attempt/jobs?per_page=1" -q .total_count); then
+                echo "::warning::Could not count the jobs of $url, attempt $attempt"
+                status=1
+                continue
+              fi
+              if [ "$conclusion" = startup_failure ] || [ "$total" = 0 ]; then
+                report "$prefix: the workflow does not start" "<!-- ci-report run=$run attempt=$attempt -->" \
+                  "$what did not start: $url (commit $sha). GitHub refused $files or an action they use." ||
+                  { echo "::warning::Could not report $url"; status=1; }
+                continue
+              fi
+              if ! jobs=$(gh api --paginate "repos/$GH_REPO/actions/runs/$run/attempts/$attempt/jobs?per_page=100" \
+                            -q '.jobs[] | select(.conclusion | IN("failure", "timed_out", "cancelled"))
+                                | [.id, .conclusion, .name, .html_url, (.runner_name // "")] | @tsv'); then
+                echo "::warning::Could not list the jobs of $url, attempt $attempt"
+                status=1
+                continue
+              fi
+              # A job ends cancelled when it reaches its timeout, or waits a
+              # day for a runner, and maybe when its runner goes away, as when
+              # it is cancelled by hand or by a newer run, which say so.  One
+              # that never got a runner fails only when it waited too long: the
+              # others were cancelled with their run.  A run cancelled by hand is
+              # left alone, failed jobs and all: a re-run would start the
+              # cancelled ones too.
+              failed="" by_hand="" gate="" unknown=""
+              while IFS=$'\t' read -r job job_conclusion name job_url runner; do
+                [ -n "$job" ] || continue
+                # The caller job's name, arm64.yml's one job, adds nothing
+                name=${name#arm64 / }
+                # CI's gate fails with the jobs it waits for, reported already,
+                # or alone, with one cancelled while it waited for a runner
+                if [ "$name" = ci-passed ]; then
+                  gate="$job"$'\t'"$name"$'\t'"$job_url"$'\n'
+                  continue
+                fi
+                if [ "$job_conclusion" = cancelled ]; then
+                  # Not knowing why, the run is left for the next pass
+                  if ! notes=$(gh api "repos/$GH_REPO/check-runs/$job/annotations?per_page=100" -q '.[].message'); then
+                    echo "::warning::Could not tell why $name of $url was cancelled"
+                    status=1
+                    unknown=1
+                    break
+                  fi
+                  if grep -qE 'was canceled by|Canceling since a higher priority' <<< "$notes"; then
+                    by_hand=1
+                    break
+                  fi
+                  if [ -z "$runner" ] && ! grep -q 'exceeded the maximum execution time' <<< "$notes"; then
+                    continue
+                  fi
+                fi
+                failed+="$job"$'\t'"$name"$'\t'"$job_url"$'\n'
+              done <<< "$jobs"
+              [ -z "$unknown" ] || continue
+              # The gate alone, in a run that failed rather than was cancelled
+              if [ -z "$failed" ] && [ "$conclusion" = failure ]; then
+                failed=$gate
+              fi
+              if [ -n "$by_hand" ] || [ -z "$failed" ]; then
+                echo "$url: cancelled, not failed"
+                continue
+              fi
+              marker="<!-- ci-report run=$run attempt=$attempt -->"
+              if [ "$attempt" = 1 ]; then
+                # Reported, in part, by an earlier pass, which could not re-run
+                # it: not re-run now, which would report its failures twice,
+                # but on to the reports, for the jobs not reported yet
+                seen=
+                while IFS=$'\t' read -r _ name _; do
+                  [ -n "$name" ] || continue
+                  reported "$prefix: $name fails" "$marker"
+                  case $? in 0) seen=reported; break ;; 2) seen=unknown; break ;; esac
+                done <<< "$failed"
+                if [ "$seen" = unknown ]; then
+                  echo "::warning::Could not tell whether $url was reported"
+                  status=1
+                  continue
+                fi
+              fi
+              if [ "$attempt" = 1 ] && [ -z "$seen" ]; then
+                # Read now, just before the re-run, so that a push since the
+                # listing is not cancelled by it
+                if [ "$event" = push ] && ! newest=$(gh api -X GET "repos/$GH_REPO/actions/workflows/$file/runs" \
+                                                       -f event=push -f branch=main -f per_page=1 -q '.workflow_runs[0].id'); then
+                  echo "::warning::Could not tell whether $url is the newest $file run of a push"
+                  status=1
+                  continue
+                fi
+                if [ "$event" = push ] && [ "$newest" != "$run" ]; then
+                  echo "$url: a newer push's run tests main now"
+                  continue
+                fi
+                if gh run rerun "$run" --failed; then
+                  echo "Re-ran the failed jobs of $url"
+                  continue
+                fi
+                # Being re-run already, by a pass just before this one, which
+                # the listing may not show yet; otherwise reported as it is,
+                # rather than aging out of the window
+                if ! now=$(gh api "repos/$GH_REPO/actions/runs/$run" -q '"\(.status) \(.run_attempt)"'); then
+                  echo "::warning::Could not re-run $url, nor read it"
+                  status=1
+                  continue
+                fi
+                if [ "$now" != "completed 1" ]; then
+                  echo "$url is being re-run"
+                  continue
+                fi
+                echo "::warning::Could not re-run $url: reporting it"
+                status=1
+              fi
+              while IFS=$'\t' read -r job name job_url; do
+                [ -n "$job" ] || continue
+                # Before the log is fetched: most passes find every report made
+                reported "$prefix: $name fails" "$marker"
+                case $? in
+                  0) continue ;;
+                  2) echo "::warning::Could not tell whether $name of $url was reported"; status=1; continue ;;
+                esac
+                # shellcheck disable=SC2016 # the backticks are the code block's
+                body=$(printf '%s failed in %s%s.\n\n- Job: %s (attempt %s)\n- Commit: %s\n\n```text\n%s\n```\n' \
+                         "$name" "$what" "$([ "$attempt" = 1 ] || echo ', again on a re-run')" \
+                         "$job_url" "$attempt" "$sha" "$(excerpt "$job")")
+                report "$prefix: $name fails" "$marker" "$body" ||
+                  { echo "::warning::Could not report $name of $url"; status=1; }
+              done <<< "$failed"
+            done <<< "$runs"
+          }
+
+          gh label create ci/nightly --color B60205 \
+            --description "A job of the nightly arm64 run that fails (ci-report.yml)" >/dev/null 2>&1
+          gh label create ci/main --color B60205 \
+            --description "A job of CI on main that fails (ci-report.yml)" >/dev/null 2>&1
+          # Ended, not started, in the last two days: Sunday's run, or a
+          # re-run, can end days after it started.  A time, so safe in jq's
+          # program, as gh api takes no --arg.
+          since=$(date -u -d '2 days ago' +%FT%TZ)
+          sweep arm64.yml schedule "the nightly arm64 run" "arm64 nightly" ci/nightly "arm64.yml, arm64-jobs.yml"
+          sweep ci.yml push "the CI run of a push to main" "CI on main" ci/main ci.yml
+          sweep arm64.yml push "the arm64 run of a push to main" "arm64 on main" ci/main "arm64.yml, arm64-jobs.yml"
+          exit "$status"
