@@ -922,13 +922,14 @@ demos *which:
     set -euo pipefail
     just build
     which="{{which}}"
-    [ -n "$which" ] || which="supply-chain autonomous http-flask http-express http-kestrel pptx agent-fw-local"
+    [ -n "$which" ] || which="supply-chain php2shell autonomous http-flask http-express http-kestrel pptx agent-fw-local"
     for d in $which; do
         echo "════════════════════════════════════════════"
         echo "  demo: $d"
         echo "════════════════════════════════════════════"
         case "$d" in
         supply-chain)   just build-rootfs python ;;
+        php2shell)      just build-rootfs php ;;
         autonomous)     just build-rootfs python; just build-rootfs autonomous "{{examples_dir}}/autonomous/Dockerfile" ;;
         http-flask)     just build-rootfs python-shell; just build-rootfs http-flask "{{examples_dir}}/http-server/flask/Dockerfile" ;;
         http-express)   just build-rootfs node; just build-rootfs http-express "{{examples_dir}}/http-server/express/Dockerfile" ;;
@@ -950,7 +951,7 @@ demos *which:
     just build
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $which = "{{which}}"
-    if (-not $which) { $which = "supply-chain autonomous http-flask http-express http-kestrel pptx agent-fw-local" }
+    if (-not $which) { $which = "supply-chain php2shell autonomous http-flask http-express http-kestrel pptx agent-fw-local" }
     $py = if (Get-Command py -ErrorAction SilentlyContinue) { "py" } else { "python" }
     foreach ($d in $which.Split(" ", [StringSplitOptions]::RemoveEmptyEntries)) {
         Write-Host "== demo: $d =="

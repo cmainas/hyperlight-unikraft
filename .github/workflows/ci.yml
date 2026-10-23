@@ -417,7 +417,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux, windows]
-        demo: [supply-chain, autonomous, http-flask, http-express, http-kestrel, pptx, agent-fw-local]
+        demo: [supply-chain, php2shell, autonomous, http-flask, http-express, http-kestrel, pptx, agent-fw-local]
         include:
           - os: linux
             runner: ubuntu-latest

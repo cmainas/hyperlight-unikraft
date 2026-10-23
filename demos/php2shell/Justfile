@@ -1,0 +1,59 @@
+# PHP RCE containment demo — Hyperlight micro-VM (hluk)
+#
+# A flaw in a PHP engine can hand an attacker code execution in the PHP
+# process.  This demo assumes that has happened — the attacker is running
+# arbitrary PHP (payload.php) — and shows how far the payload gets:
+#
+#   just bare-metal   - no sandbox: secrets stolen, C2 reached, webshell dropped
+#   just run          - hluk sandbox (read-only mount, no network): contained
+#   just run-scoped   - hluk sandbox (mount + egress to example.com): still contained
+#   just c2           - standalone C2 listener (watch exfil arrive; split terminal)
+#
+# Linux only (KVM + Docker). Build the php rootfs once from the repo root:
+#   just build-rootfs php
+
+root_dir  := justfile_directory() / ".." / ".."
+hluk      := root_dir / "target" / "release" / "hluk"
+rootfs    := root_dir / "build-elfloader" / "php-rootfs.cpio"
+demo_dir  := justfile_directory()
+
+# Build hluk and the php rootfs if missing.
+[private]
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ( cd "{{root_dir}}" && just build )
+    if [ ! -f "{{rootfs}}" ]; then ( cd "{{root_dir}}" && just build-rootfs php ); fi
+
+# Bare metal (attack succeeds): fake secrets, a C2, a writable webroot.
+bare-metal:
+    ./bare-metal/run.sh
+
+# hluk, read-only mount, no network: the legitimate app still works, and
+# every attack phase is contained — secrets outside the mount, the
+# environment, the C2, the metadata service and a persistent webshell.
+run: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "== Legitimate request =="
+    "{{hluk}}" run --initrd "{{rootfs}}" --scratch-mb 128 \
+        --mount "{{demo_dir}}/webroot:/app:ro" \
+        --guest-exec "/app/index.php hyperlight"
+    echo ""
+    echo "== Attacker payload (assume the engine was popped) =="
+    "{{hluk}}" run --initrd "{{rootfs}}" --scratch-mb 128 \
+        --mount "{{demo_dir}}/webroot:/app:ro" --env DOCROOT=/app \
+        "{{demo_dir}}/payload.php"
+
+# hluk with egress allowed to example.com: legitimate outbound works, but
+# the C2 and the link-local metadata address are still denied.
+run-scoped: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    "{{hluk}}" run --initrd "{{rootfs}}" --scratch-mb 128 \
+        --mount "{{demo_dir}}/webroot:/app:ro" --net-allow example.com --env DOCROOT=/app \
+        "{{demo_dir}}/payload.php"
+
+# Standalone C2 listener (watch exfil arrive in a split terminal).
+c2:
+    python3 c2_server.py

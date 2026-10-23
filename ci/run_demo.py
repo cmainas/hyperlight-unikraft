@@ -7,8 +7,8 @@ rootfs CPIOs are built beforehand (by `just demos` on Linux, or restored from
 the CI cache) — so this needs no Docker and works wherever hluk does.
 
 Usage: run_demo.py <demo>
-  demos: supply-chain autonomous http-flask http-express http-kestrel pptx
-         agent-fw-local
+  demos: supply-chain php2shell autonomous http-flask http-express http-kestrel
+         pptx agent-fw-local
 """
 import os
 import subprocess
@@ -97,6 +97,21 @@ def demo_supply_chain():
     expect(out, "Attack CONTAINED", "supply-chain")
 
 
+def demo_php2shell():
+    # The attacker's payload runs as if a PHP engine flaw had handed them
+    # code execution, with the document root mounted read-only and no
+    # network: every phase (host secrets, env secrets, C2, cloud metadata,
+    # a persistent webshell) must be contained.
+    webroot = ROOT / "demos" / "php2shell" / "webroot"
+    payload = ROOT / "demos" / "php2shell" / "payload.php"
+    out = run([
+        "run", "--initrd", str(initrd("php")), "--scratch-mb", "128",
+        "--mount", f"{webroot}:/app:ro", "--env", "DOCROOT=/app",
+        str(payload),
+    ])
+    expect(out, "Attack CONTAINED", "php2shell")
+
+
 def demo_autonomous():
     out = run(["run", "--initrd", str(initrd("autonomous")), "--scratch-mb", "256"])
     expect(out, "autonomous appliance", "autonomous")
@@ -138,6 +153,7 @@ def demo_agent_fw_local():
 
 DEMOS = {
     "supply-chain": demo_supply_chain,
+    "php2shell": demo_php2shell,
     "autonomous": demo_autonomous,
     "http-flask": lambda: demo_http("http-flask", "256",
                                     [str(ROOT / "examples/http-server/flask/server.py")],
