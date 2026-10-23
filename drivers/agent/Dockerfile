@@ -54,6 +54,7 @@ COPY drivers/hl_fc.h           /src/drivers/hl_fc.h
 COPY drivers/hl_env.h /src/drivers/hl_env.h
 COPY drivers/hl_driver.h /src/drivers/hl_driver.h
 COPY drivers/hl_py.h /src/drivers/hl_py.h
+COPY drivers/hl_reseed.h /src/drivers/hl_reseed.h
 COPY drivers/hl_pywarmdriver.c /src/drivers/hl_pywarmdriver.c
 
 RUN gcc -O2 -Wall -Wextra -Wno-unused-parameter \
