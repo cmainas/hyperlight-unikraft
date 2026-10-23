@@ -60,7 +60,7 @@ static int g_pipe_from_dotnet = -1;  /* parent reads the status here */
 
 /*
  * The persistent .NET child was spawned at boot and does not see the
- * parent's setenv(), so each call carries the host's variables as
+ * variables the parent sets, so each call carries the host's variables as
  * KEY NUL VALUE NUL pairs, which the child sets before the call runs.
  */
 static void dotnet_env_visitor(const char *key, const char *val, void *ctx)
@@ -220,10 +220,18 @@ static int dotnet_dispatch(const uint8_t *fc, size_t fc_len)
 	if (g_dotnet_pid < 0 && dotnet_spawn() < 0)
 		goto out;
 
-	/* Refresh env vars: setenv() here, KEY/VALUE pairs for the child. */
+	/* Refresh env vars: set here, KEY/VALUE pairs for the child. */
 	hl_env_refresh(dotnet_env_visitor, &env);
 	if (env.err) {
 		fprintf(stderr, "hl_dotnetdriver: out of memory for the environment\n");
+		fflush(stderr);
+		goto out;
+	}
+
+	/* Restored from a snapshot: the child's generators first. */
+	if (hl_driver_restored() && hl_child_send_reseed(g_pipe_to_dotnet) < 0) {
+		fprintf(stderr, "hl_dotnetdriver: .NET had exited with status %d\n",
+			dotnet_reap());
 		fflush(stderr);
 		goto out;
 	}

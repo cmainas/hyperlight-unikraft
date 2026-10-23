@@ -19,14 +19,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "hl_reseed.h"
+
 /* ── env → os.environ bridge ───────────────────────────────────── */
 
 /*
  * CPython copies the C environ into os.environ at startup and reads that
- * copy from then on, so setenv() alone is invisible to user code.  Each
- * host variable is set on os.environ through the C API: no source text,
- * so nothing to quote and no limit on count or length, and the user's
- * code keeps its own line numbers in tracebacks.
+ * copy from then on, so the C side's environ alone is invisible to user
+ * code.  Each host variable is set on os.environ through the C API: no
+ * source text, so nothing to quote and no limit on count or length, and
+ * the user's code keeps its own line numbers in tracebacks.
  */
 struct hl_py_env_ctx {
 	PyObject *environ;
@@ -59,7 +61,7 @@ static void hl_py_env_visitor(const char *key, const char *val, void *ctx)
 	if (!k || !v)
 		goto err;
 	/* A name the host takes over keeps the guest's value aside (os.environ
-	 * still has it: setenv() reached only the C side).  At the first
+	 * still has it: hl_env_refresh() reached only the C side).  At the first
 	 * refresh, made at boot (hl_py_serve()), a value equal to the host's
 	 * is the host's own, given at boot, not the guest's: taking it away
 	 * unsets it.  PATH is the exception: the driver set it itself. */
@@ -87,7 +89,7 @@ err:
 	Py_XDECREF(v);
 }
 
-/* Refresh the environment: setenv() for the C side, os.environ for
+/* Refresh the environment: the C side's environ, os.environ for
  * Python's.  The host sends its whole environment each time, so a name it
  * sent before and not now was taken away: it goes back to the guest's own
  * value, or from os.environ (and so from the C environ) if the guest had
@@ -267,6 +269,7 @@ static unsigned long g_hl_py_serving;
 static PyObject *g_hl_py_dumps, *g_hl_py_loads, *g_hl_py_host_error;
 static PyObject *g_hl_py_call_fn;	/* hyperlight._call */
 static PyObject *g_hl_py_sync_path_fn;	/* hyperlight._sync_path */
+static PyObject *g_hl_py_reseed_fn;	/* hyperlight._reseed */
 
 /* hyperlight.call(name, *args): the host function `name`, its arguments
  * and result as JSON. */
@@ -353,6 +356,31 @@ static struct PyModuleDef hl_py_module = {
  * body of a call, run by hl_py_call. */
 static const char HL_PY_MODULE_SRC[] =
 	"import json as _json, sys as _sys\n"
+	"# After a restore from a snapshot: the generators of modules imported\n"
+	"# before it, seeded then and the same in every guest restored from it,\n"
+	"# draw from new seeds (the kernel's, reseeded on restore).  random's\n"
+	"# module-level functions, NumPy's legacy ones (np.random.rand...),\n"
+	"# tempfile's names, which it remakes when dropped, and cryptography's\n"
+	"# OpenSSL; a generator the code made itself (random.Random(),\n"
+	"# default_rng()) keeps its state.\n"
+	"def _reseed():\n"
+	"    import os\n"
+	"    def random(m): m.seed()\n"
+	"    def tempfile(m): m._name_sequence = None\n"
+	"    def numpy_random(m): m.seed()\n"
+	"    # cryptography's wheel links an OpenSSL of its own into its\n"
+	"    # extension, out of hl_reseed_libraries()'s reach.\n"
+	"    def cryptography(m): m._openssl.lib.RAND_add(os.urandom(32), 32, 32.0)\n"
+	"    for name, reseed in (('random', random), ('tempfile', tempfile),\n"
+	"                         ('numpy.random', numpy_random),\n"
+	"                         ('cryptography.hazmat.bindings._rust', cryptography)):\n"
+	"        m = _sys.modules.get(name)\n"
+	"        if m is None:\n"
+	"            continue\n"
+	"        try:\n"
+	"            reseed(m)\n"
+	"        except Exception as e:\n"
+	"            print(f'hyperlight: cannot reseed {name}: {e}', file=_sys.stderr)\n"
 	"class _Host:\n"
 	"    def __init__(self, prefix=''):\n"
 	"        self._prefix = prefix\n"
@@ -463,7 +491,8 @@ static PyObject *hl_py_module_init(void)
 	Py_DECREF(r);
 	g_hl_py_call_fn = PyObject_GetAttrString(m, "_call");
 	g_hl_py_sync_path_fn = PyObject_GetAttrString(m, "_sync_path");
-	if (!g_hl_py_call_fn || !g_hl_py_sync_path_fn)
+	g_hl_py_reseed_fn = PyObject_GetAttrString(m, "_reseed");
+	if (!g_hl_py_call_fn || !g_hl_py_sync_path_fn || !g_hl_py_reseed_fn)
 		goto fail;
 	return m;
 fail:
@@ -537,6 +566,18 @@ static int hl_py_call(const char *name, size_t name_len, const char *input,
 
 static int hl_py_run(const uint8_t *fc, size_t fc_len)
 {
+	/* Restored from a snapshot: the libraries' generators (OpenSSL,
+	 * SQLite) and Python's own draw from new seeds. */
+	if (hl_driver_restored()) {
+		hl_reseed_libraries();
+		if (g_hl_py_reseed_fn) {
+			PyObject *r = PyObject_CallNoArgs(g_hl_py_reseed_fn);
+
+			if (!r)
+				PyErr_Print();
+			Py_XDECREF(r);
+		}
+	}
 	hl_py_env_refresh();
 	if (g_hl_py_sync_path_fn) {
 		PyObject *r = PyObject_CallNoArgs(g_hl_py_sync_path_fn);

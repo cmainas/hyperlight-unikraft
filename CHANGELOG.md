@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - CI runs in three tiers, described in [`docs/ci.md`](docs/ci.md): Linux and Windows on x86_64 on every pull request, macOS and Windows arm64 on pull requests labelled `ci/arm64`, and Linux arm64 too nightly, blocking nothing. A pull request runs the tier-1 jobs its files call for: documentation alone gets the spell check, `integrations/<name>/` alone gets lint, the Rust tests and that integration, smolagents bringing MCP's (the `ci/integrations` label adds them all). `ci-report.yml` re-runs a failed run on `main` once, the nightly run or the newest push's, and files each job that fails again, a timeout included, as an issue labelled `ci/nightly` or `ci/main`.
 - Dependabot also proposes updates for the Rust toolchain (`rust-toolchain.toml`, labelled `ci/arm64`) and for the libraries of the Python integrations (smolagents, MCP, verl), whose caps it widens when a release past one is out (a minor, for a 0.x cap), keeping the floors CI tests.
+- A driver can ask how many times the guest was restored from a snapshot (`HLCALL_IOC_RESTORES`, `hl_driver_restored()` in `drivers/hl_driver.h`), to reseed what its runtime seeded before the snapshot ([`docs/driver.md`](docs/driver.md)).
 
 ### Changed
 
@@ -16,6 +17,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - `just conformance` now and then ran a module its skip list names (`known_failures.toml`, `CONFORMANCE_SKIP`), failing the job when it crashed (`test_regrtest` on Linux arm64): the skip-list check, a pipe into `grep -q`, could read an early exit of `grep` as a miss.
+- A snapshot could leave out part of a guest's memory: the kernel mapped each aligned 2 MiB of an `mmap`ed range (an ELF segment the elfloader maps, say) with one large page, which Hyperlight's snapshot drops, so a guest restored from it could fault there. The kernel now maps 4 KiB pages only, and `mmap(MAP_HUGETLB)` fails with `ENOMEM`, as on Linux without a hugepage pool.
+- The drivers set every host environment variable again at the top of every call, with `setenv()`, which on musl frees the string the variable had: code still holding it read freed memory (PHP's `putenv()` keeps the string it replaces, SQLite caches `getenv("TMPDIR")`). A variable is now set only when it changed, with `putenv()` and a string that stays.
+- Programs did not get random `AT_RANDOM` bytes of their own: the elfloader pointed the auxiliary vector at a stale stack frame. Go's runtime seeds from those bytes, so `math/rand` drew the same numbers in every clone of a snapshot. The bytes are now copied onto the program's stack, as Linux does.
+- A program started with an empty argument or environment string (`sh -c 'cmd' ''`, a BusyBox hush pipeline led by a builtin, as `set | grep`) crashed the guest's kernel (`Assertion failure: len`). Empty strings now reach the program, as on Linux.
+- Generators a runtime seeded before a snapshot kept their state in every guest restored from it, though the kernel reseeds its own: Python's `random` and NumPy's legacy `np.random`, OpenSSL (`cryptography`'s copy too), SQLite's `random()`, node's and Java's `Math.random`, Java's `ThreadLocalRandom`, DRBGs and new generators' seeds, .NET's `Random.Shared`, and bash's `$RANDOM`. The kernel now counts restores (`HLCALL_IOC_RESTORES`), and each driver reseeds them from the kernel on the first call after one; [`docs/random.md`](docs/random.md) lists what each image covers and what no driver can, such as a generator the code made before the snapshot. The bash image's BusyBox seeds `$RANDOM` when `RANDOM` is assigned, as bash does, and from the kernel rather than the pid and the clock.
 
 ## [v0.19.0]
 

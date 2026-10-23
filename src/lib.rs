@@ -1289,12 +1289,12 @@ impl GuestConfig {
     /// prefer [`SandboxBuilder::env`], which applies these before the guest
     /// boots.  This setter updates the environment for subsequent `run()`
     /// dispatches: each dispatch calls `hl_env_refresh()`, which re-queries
-    /// the host and calls `setenv()` for every returned variable.
+    /// the host and sets each returned variable that changed.
     ///
     /// **Caveat — full replace, not merge**: This replaces the entire
     /// env var set, not merging with the previous one.  The Python
     /// drivers unset a variable removed from the host side; the others'
-    /// `hl_env_refresh()` only calls `setenv()`, never `unsetenv()`, so
+    /// `hl_env_refresh()` only sets variables, never unsets them, so
     /// there stale variables from earlier dispatches linger until the
     /// guest is restored from a snapshot.
     ///

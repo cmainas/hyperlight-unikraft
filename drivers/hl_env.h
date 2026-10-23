@@ -7,7 +7,7 @@
  * the moment the host changes a variable -- after a snapshot restore,
  * typically.  So the driver asks the kernel for the host's current
  * environment (the HLCALL_IOC_GETENV ioctl on /dev/hlcall, see
- * hl_driver.h) at the top of each call it serves and setenv()s it.
+ * hl_driver.h) at the top of each call it serves and sets it.
  *
  * Usage: call hl_env_refresh(cb, ctx) at the top of each dispatch.  The
  * optional callback carries each variable into the runtime: Python sets
@@ -38,12 +38,22 @@ typedef void (*hl_env_cb_t)(const char *key, const char *val, void *ctx);
 static char *g_hl_env_buf;
 
 /*
- * Fetch the host's environment and setenv() every variable, overriding
- * what was there; cb, if non-NULL, sees each one too.
+ * Fetch the host's environment and set every variable that changed,
+ * overriding what was there; cb, if non-NULL, sees each one too.
  *
- * Returns the number of variables set, 0 if there are none; -1 if the
- * environment could not be read (the device is not open, or the kernel
- * has no such ioctl), when there is nothing to refresh from.
+ * Set with putenv() and a string of the driver's that is never freed, not
+ * setenv(): musl frees the string setenv() put in environ when the
+ * variable is set again, and code keeps pointers to environ's strings
+ * (PHP's putenv() keeps the one it replaces to put it back, SQLite caches
+ * getenv("TMPDIR")).  A variable that did not change is left alone, so a
+ * call costs no allocation per variable; one that did leaks its old
+ * string, like glibc's setenv().  (A string other code set with setenv()
+ * is still musl's, which frees it when this replaces it.)
+ *
+ * Returns the number of the host's variables, those set and those left
+ * as they were, 0 if it has none; -1 if the environment could not be
+ * read (the device is not open, or the kernel has no such ioctl), when
+ * there is nothing to refresh from.
  */
 static inline int hl_env_refresh(hl_env_cb_t cb, void *ctx)
 {
@@ -72,10 +82,25 @@ static inline int hl_env_refresh(hl_env_cb_t cb, void *ctx)
 	     p += strlen(p) + 1) {
 		char *eq = strchr(p, '=');
 
+		const char *cur;
+
 		if (!eq || eq == p)
 			continue;
+		/* The key alone, for getenv() and cb. */
 		*eq = '\0';
-		setenv(p, eq + 1, 1);
+		cur = getenv(p);
+		if (!cur || strcmp(cur, eq + 1)) {
+			char *entry;
+
+			*eq = '=';
+			entry = strdup(p);
+			/* Not set (out of memory): the C side keeps the old
+			 * value, and the runtime still gets the new one, as
+			 * setenv() failing left it, rather than lose it. */
+			if (entry && putenv(entry))
+				free(entry);
+			*eq = '\0';
+		}
 		if (cb)
 			cb(p, eq + 1, ctx);
 		*eq = '=';
@@ -89,7 +114,7 @@ static inline int hl_env_refresh(hl_env_cb_t cb, void *ctx)
 
 /*
  * A driver whose runtime is a separate process (bash, Node, .NET) cannot
- * setenv() into it; it prefixes each call's source with one assignment
+ * set its environment; it prefixes each call's source with one assignment
  * per variable instead.  The buffer grows with the environment -- the
  * kernel hands over all of it -- and the values are quoted as literals
  * of the target language, so no character in a value can alter the
@@ -200,7 +225,7 @@ static inline void hl_strbuf_put_shquoted(struct hl_strbuf *b, const char *s)
 /* Whether @key is a name a shell accepts in `export KEY=`: ASCII
  * letters, digits and underscore, not starting with a digit.  Spelled
  * out rather than isalpha(), which follows the process locale.  Other
- * keys are left to setenv() alone. */
+ * keys are set in the C side's environment alone. */
 static inline int hl_env_key_is_identifier(const char *key)
 {
 	for (const char *p = key; *p; p++) {

@@ -13,6 +13,12 @@ RUN gcc -O2 -Wall -Wextra -Wno-unused-parameter \
         -static-pie -fPIE \
         -o /hl_nodedriver /src/drivers/node/hl_nodedriver.c
 
+# The addon that reseeds Node's OpenSSL after a restore: its symbols are
+# the node binary's, resolved when the child loads it.
+COPY drivers/node/hl_reseed_addon.c /src/drivers/node/hl_reseed_addon.c
+RUN gcc -O2 -Wall -Wextra -shared -fPIC -I/usr/local/include/node \
+        -o /hl_reseed.node /src/drivers/node/hl_reseed_addon.c
+
 # musl's dynamic linker is named for the architecture (x86_64, aarch64)
 RUN mkdir -p /musl && cp /lib/ld-musl-$(uname -m).so.1 /musl/
 
@@ -26,6 +32,9 @@ COPY --from=build /usr/lib/libstdc++.so.6 /usr/lib/libstdc++.so.6
 
 # Node binary
 COPY --from=build /usr/local/bin/node /usr/bin/node
+
+# The child's OpenSSL reseed addon (hl_reseed_addon.c)
+COPY --from=build /hl_reseed.node /usr/lib/node/hl_reseed.node
 
 # Hyperlight driver
 COPY --from=build /hl_nodedriver /usr/local/bin/hl_nodedriver

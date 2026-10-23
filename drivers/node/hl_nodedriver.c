@@ -55,7 +55,7 @@ static int g_pipe_from_node = -1;  /* parent reads the status here */
 
 /*
  * The persistent Node child was spawned at boot and does not see the
- * parent's setenv(), so each call's code is prefixed with a
+ * variables the parent sets, so each call's code is prefixed with a
  * `process.env[<key>]=<value>;` line per host variable, key and value
  * as JSON string literals.
  */
@@ -92,6 +92,46 @@ static int write_bootstrap(int fd_in, int fd_out)
 		"globalThis.module = module;\n"
 		"globalThis.__dirname = __dirname;\n"
 		"globalThis.__filename = __filename;\n"
+		"\n"
+		"// The generators a snapshot would clone, which hlReseed() draws\n"
+		"// anew after a restore ('R', hl_child.h): OpenSSL's DRBG (through\n"
+		"// hl_reseed.node), the bytes crypto.randomUUID() and randomInt()\n"
+		"// keep ahead (drained, so they refill from it), and Math.random,\n"
+		"// whose V8 state cannot be reseeded: it is the kernel's generator\n"
+		"// here, 64 draws at a time, with V8's 53 bits per draw.\n"
+		"const hlReseed = (() => {\n"
+		"  // Node's own, as they are now: code may replace them later.\n"
+		"  const { randomUUID, randomInt } = require('crypto');\n"
+		"  let addon = null, addonError = null;\n"
+		"  try {\n"
+		"    const m = { exports: {} };\n"
+		"    process.dlopen(m, '/usr/lib/node/hl_reseed.node');\n"
+		"    addon = m.exports;\n"
+		"  } catch (e) { addonError = e; }\n"
+		"  const cache = new Float64Array(64);\n"
+		"  let next = cache.length;\n"
+		"  if (addon) {\n"
+		"    const fill = addon.fill;\n"
+		"    // A method, as V8's: not a constructor, no prototype.\n"
+		"    Object.defineProperty(Math, 'random', {\n"
+		"      value: ({ random() {\n"
+		"        if (next === cache.length) { fill(cache); next = 0; }\n"
+		"        return cache[next++];\n"
+		"      } }).random,\n"
+		"      writable: true, configurable: true, enumerable: false,\n"
+		"    });\n"
+		"  }\n"
+		"  return () => {\n"
+		"    if (!addon) {\n"
+		"      process.stderr.write(`hl_nodedriver: cannot reseed OpenSSL or Math.random: ${addonError}\\n`);\n"
+		"      return;\n"
+		"    }\n"
+		"    addon.reseed();\n"
+		"    next = cache.length;\n"
+		"    for (let i = 0; i < 128; i++) randomUUID();\n"
+		"    for (let i = 0; i < 1024; i++) randomInt(281474976710655);\n"
+		"  };\n"
+		"})();\n"
 		"\n"
 		"// Signal ready to parent\n"
 		"fs.writeSync(fd_out, Buffer.from([0]));\n"
@@ -241,6 +281,13 @@ static int write_bootstrap(int fd_in, int fd_out)
 		"    const hdr = await readExactly(9);\n"
 		"    if (!hdr) break;\n"
 		"    const len = Number(hdr.readBigUInt64LE(1));\n"
+		"    if (hdr[0] === 0x52) {  // 'R': the guest was restored\n"
+		"      if (len && !(await readExactly(len))) break;\n"
+		"      try { hlReseed(); } catch (e) {\n"
+		"        process.stderr.write(`hl_nodedriver: cannot reseed: ${e}\\n`);\n"
+		"      }\n"
+		"      continue;\n"
+		"    }\n"
 		"    const buf = len ? await readExactly(len) : Buffer.alloc(0);\n"
 		"    if (!buf) break;\n"
 		"    let off = 0;\n"
@@ -438,10 +485,18 @@ static int node_dispatch(const uint8_t *fc, size_t fc_len)
 		code_len = sizeof(GX_LAUNCHER) - 1;
 	}
 
-	/* Refresh env vars: setenv() here, process.env lines for the child. */
+	/* Refresh env vars: set here, process.env lines for the child. */
 	hl_env_refresh(node_env_visitor, &env);
 	if (env.err) {
 		fprintf(stderr, "hl_nodedriver: out of memory for the environment\n");
+		fflush(stderr);
+		goto out;
+	}
+
+	/* Restored from a snapshot: the child's generators first. */
+	if (hl_driver_restored() && hl_child_send_reseed(g_pipe_to_node) < 0) {
+		fprintf(stderr, "hl_nodedriver: node had exited with status %d\n",
+			node_reap());
 		fflush(stderr);
 		goto out;
 	}

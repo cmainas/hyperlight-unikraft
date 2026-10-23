@@ -3,7 +3,8 @@
 //
 // Each call comes down a pipe from the driver (drivers/hl_child.h has the
 // protocol): 'E' runs code with JShell, 'C' calls a guest function; the
-// answer is 'S', the status, and the result.  The pipe fds are the two
+// answer is 'S', the status, and the result.  'R' says the guest was
+// restored, before the call that follows: Reseed.java.  The pipe fds are the two
 // arguments.
 
 package hyperlight;
@@ -33,6 +34,12 @@ public final class Dispatch {
         // compiles its own code.
         var snippets = new Snippets();
         snippets.warmUp();
+        try {
+            Reseed.prepare();
+        } catch (Throwable t) {
+            // The reseed is best effort: the runtime starts without it.
+            System.err.println("hl_java_dispatch: cannot prepare the reseed: " + t);
+        }
 
         out.write(0);
         out.flush();
@@ -66,6 +73,22 @@ public final class Dispatch {
             if (header.length < 9)
                 return;
             int len = Math.toIntExact(le(header).getLong(1));
+            // 'R': the guest was restored from a snapshot, and the call
+            // that follows comes to a JVM whose generators are every
+            // restored guest's.  A body, if one is ever sent, is skipped;
+            // no reply.
+            if (header[0] == 'R') {
+                if (Host.readUpTo(in, len).length < len)
+                    return;
+                try {
+                    Reseed.run();
+                } catch (Throwable t) {
+                    // A class the reseed initialized failing, say: the
+                    // call that follows still runs.
+                    System.err.println("hl_java_dispatch: cannot reseed: " + t);
+                }
+                continue;
+            }
             var body = le(Host.readUpTo(in, len));
             if (body.limit() < len)
                 return;

@@ -817,12 +817,12 @@ build-test-bins:
     # The pinned toolchain first: `target add` installing it by itself is
     # deprecated in rustup.
     rustup toolchain install
-    for src in hello env_vars; do
+    for src in hello env_vars random; do
         rustc -C opt-level=2 -C target-feature=+crt-static -C relocation-model=pie \
             -o "$bins/rust/$src" "{{examples_dir}}/rust/$src.rs"
     done
     echo "==> Go"
-    for src in hello env_vars counter; do
+    for src in hello env_vars counter random; do
         CGO_ENABLED=0 GOOS=linux go build -buildmode=pie -ldflags='-s -w' \
             -o "$bins/go/$src" "{{examples_dir}}/go/$src.go"
     done

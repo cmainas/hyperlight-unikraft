@@ -4,7 +4,7 @@ A driver is the program the kernel starts in a runtime image.  It brings its run
 
 ## The device
 
-The whole contract is one character device, `/dev/hlcall`, and six operations on it, listed in the order a driver uses them:
+The whole contract is one character device, `/dev/hlcall`, and seven operations on it, listed in the order a driver uses them:
 
 | Operation | Meaning |
 |---|---|
@@ -12,10 +12,11 @@ The whole contract is one character device, `/dev/hlcall`, and six operations on
 | `ioctl(HLCALL_IOC_MAXLEN)` | How large a call can be, a `uint64_t` the kernel knows from the transport geometry the host published.  The driver allocates its read buffer from it, once. |
 | `read()` | Blocks until the host issues a call, then returns it whole: the FunctionCall FlatBuffer as the host encoded it.  Reading again completes the previous call. |
 | `ioctl(HLCALL_IOC_GETENV)` | The variables the embedder set (`--env`, `set_env_vars`) as they are now, `KEY=VALUE` entries separated by NUL, into a buffer the driver provides.  Asked at the top of every call; the kernel answers from its own copy unless the embedder changed the variables since (each call carries the host's version of them), so an unchanged environment costs no host call. |
+| `ioctl(HLCALL_IOC_RESTORES)` | How many times the guest was restored from a snapshot, a `uint64_t`.  A driver whose runtime seeded random generators before the snapshot asks it at the top of each call (`hl_driver_restored()`) and reseeds them when it went up; see [random.md](random.md). |
 | `ioctl(HLCALL_IOC_HOSTCALL)` | Call one of the embedder's functions (`SandboxBuilder::host_function`) by name and get its reply. The kernel forwards it as the host function `HostCall(name, args)`. Only while a call is in flight. |
 | `write()` | An `int32_t` status for the call being served, optionally followed by its result, which the kernel reports with the entry's `Yield`. Written when the call failed or has a result. Refused when no call is in flight. |
 
-The ioctl numbers, `_IOR('H', 1, uint64_t)`, `_IOWR('H', 2, struct hlcall_env)` and `_IOWR('H', 3, struct hlcall_hostcall)`, are built with the standard macros, so the argument's size is part of the number and a layout mismatch between the two sides reads as `ENOTTY`.  The kernel's `plat/hyperlight/include/hyperlight/step.h` is the source of truth; `hl_driver.h` mirrors it.
+The ioctl numbers, `_IOR('H', 1, uint64_t)`, `_IOWR('H', 2, struct hlcall_env)`, `_IOWR('H', 3, struct hlcall_hostcall)` and `_IOR('H', 4, uint64_t)`, are built with the standard macros, so the argument's size is part of the number and a layout mismatch between the two sides reads as `ENOTTY`.  The kernel's `plat/hyperlight/include/hyperlight/step.h` is the source of truth; `hl_driver.h` mirrors it.
 
 ## From boot to a call
 
@@ -68,7 +69,7 @@ Call it from the thread serving the call. The node, dotnet-jit and java runtimes
 
 ## The environment
 
-`hluk run --env GREETING="it's me"` reaches the guest as the entry `GREETING=it's me` from `HLCALL_IOC_GETENV`.  Only the embedder's variables travel this way; what the image's runtime sets for itself stays, unless the embedder sets the same key, which then wins.  Together, with a separator after each, they must fit one host call: under 69,620 bytes, since the kernel fetches them with one.  [`hl_env.h`](../drivers/hl_env.h) does `setenv()` for the C side and hands each variable to the runtime: Python sets `os.environ["GREETING"]` through the C API, and bash, whose shell is a separate process fed with source, gets `export GREETING='it'\''s me'` in front of the call, quoted so the shell takes the value as it is.  A variable the embedder removed stays set in the guest, except under the `python`, `python-shell` and `agent` drivers, which unset it, or put back the image's own value if it had one, before the next call.
+`hluk run --env GREETING="it's me"` reaches the guest as the entry `GREETING=it's me` from `HLCALL_IOC_GETENV`.  Only the embedder's variables travel this way; what the image's runtime sets for itself stays, unless the embedder sets the same key, which then wins.  Together, with a separator after each, they must fit one host call: under 69,620 bytes, since the kernel fetches them with one.  [`hl_env.h`](../drivers/hl_env.h) sets the C side's environment (`putenv()`, for the variables that changed) and hands each variable to the runtime: Python sets `os.environ["GREETING"]` through the C API, and bash, whose shell is a separate process fed with source, gets `export GREETING='it'\''s me'` in front of the call, quoted so the shell takes the value as it is.  A variable the embedder removed stays set in the guest, except under the `python`, `python-shell` and `agent` drivers, which unset it, or put back the image's own value if it had one, before the next call.
 
 ## Snapshots
 
@@ -82,7 +83,7 @@ Python is embedded: `hl_pydriver` and `hl_pywarmdriver` link `libpython` and run
 
 Node, .NET (the dotnet-jit image) and Java ship as programs, so `hl_nodedriver`, `hl_dotnetdriver` and `hl_javadriver` spawn one child at boot and keep it: the child sits in a read on a pipe from the driver, gets each call as length-prefixed code, runs it and writes back its status.  The children also take a `Call` (a function name and input) and write back its result, and send each host function call up the same pipe for the driver to make; [`hl_child.h`](../drivers/hl_child.h) has the protocol.  Kept across calls it stays warm, and a snapshot keeps it warm.  The Java child runs each call through JShell in its JVM, and since `System.getenv()` is a copy Java has no way to change, writes the host's variables into that copy.  JShell keeps a record of every snippet: a declaration (a field, method or class) about 50 KiB of heap, which stays for the calls that use it, and each call about 15 KiB more once the statements it ran are dropped, which also slows the next calls a little.  An expression's value is freed once the call ends; a variable declared again keeps its old value, which code still running may read, so set a large one to `null` first.  A guest that serves thousands of `run` calls should be restored from its snapshot now and then; guest function calls add nothing.  `hl_bashdriver` does the same with a BusyBox `hush`, except that the call goes into a file and the byte on the pipe says "source it".  Such a child can only be reached through the source it is fed, hence the quoted assignments in front of each call.
 
-`hl_pwshdriver` starts a fresh `pwsh` per call, and `hl_execdriver`, behind the c, go, rust and dotnet-aot images, simply runs the program the call names, seeing its exit as EOF on a pipe.  A process spawned per call inherits `environ`, so `setenv()` alone reaches it.
+`hl_pwshdriver` starts a fresh `pwsh` per call, and `hl_execdriver`, behind the c, go, rust and dotnet-aot images, simply runs the program the call names, seeing its exit as EOF on a pipe.  A process spawned per call inherits `environ`, so setting the C side's environment alone reaches it.
 
 ## Writing one
 
@@ -98,7 +99,7 @@ static int foo_dispatch(const uint8_t *fc, size_t fc_len)
 
 	if (!code)
 		return -1;
-	hl_env_refresh(NULL, NULL); /* setenv() every host variable */
+	hl_env_refresh(NULL, NULL); /* set every host variable that changed */
 	return foo_run(code, len);  /* 0 on success */
 }
 

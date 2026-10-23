@@ -38,6 +38,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdint.h>
+#include <sys/random.h>
 
 #include "../hl_fc.h"
 #include "../hl_env.h"
@@ -49,14 +50,21 @@ static pid_t g_sh_pid = -1;
 static int g_pipe_to_sh = -1;    /* parent writes signal here */
 static int g_pipe_from_sh = -1;  /* parent reads ack here */
 
+/* $RANDOM's state is the shell's, the same in every guest restored from
+ * one snapshot: after a restore, bash_reseed() seeds it anew before the
+ * next call (BusyBox is patched so assigning RANDOM seeds it, as in bash,
+ * and so a new shell seeds it from the kernel rather than its pid and the
+ * clock). */
+static int g_reseed;
+
 /* ── Bash env visitor ─────────────────────────────────────────── */
 
 /*
  * The persistent hush child was spawned at boot and does not see the
- * parent's setenv(), so the dispatch script starts with an
+ * variables the parent sets, so the dispatch script starts with an
  * `export KEY='value'` line per host variable, the value single-quoted
  * so the shell takes it as it is.  A key the shell would not accept as
- * a name is left to setenv() alone.
+ * a name is set in the parent's environment alone.
  */
 static void bash_env_visitor(const char *key, const char *val, void *ctx)
 {
@@ -196,11 +204,61 @@ static int bash_spawn(void)
 
 /* ── Dispatch callback ─────────────────────────────────────────── */
 
+/*
+ * Seed $RANDOM in the shell, as a script of its own: one that fails to
+ * parse would take a seed on its first line with it, and a line of ours
+ * in front of the call's would move its line numbers.  Not where the code
+ * made RANDOM a variable of its own (export, readonly), which the
+ * assignment would overwrite: a variable reads the same twice, the
+ * generator does not.  0 once the shell has run it.
+ */
+static int bash_reseed(void)
+{
+	uint64_t seed;
+	char ack;
+	FILE *f;
+
+	if (getrandom(&seed, sizeof(seed), 0) != sizeof(seed))
+		return -1;
+	f = fopen("/tmp/hl_dispatch.sh", "w");
+	if (!f)
+		return -1;
+	/* A hush without the patch makes the assignment a variable: unset
+	 * it again, back to the generator, unseeded but not stuck. */
+#define HL_TWICE "\"$RANDOM$RANDOM$RANDOM\" = \"$RANDOM$RANDOM$RANDOM\""
+	fprintf(f, "{ [ " HL_TWICE " ] || { RANDOM=%llu; ! [ " HL_TWICE " ] || unset RANDOM; }; "
+		"} 2>/dev/null || :\n", (unsigned long long)seed);
+#undef HL_TWICE
+	if (fclose(f) != 0)
+		return -1;
+	if (write(g_pipe_to_sh, "g\n", 2) != 2 || read(g_pipe_from_sh, &ack, 1) != 1) {
+		/* The shell is gone: the call gets a new one. */
+		unlink("/tmp/hl_dispatch.sh");
+		fprintf(stderr, "hl_bashdriver: the shell had exited with status %d\n",
+			bash_reap());
+		fflush(stderr);
+		return -1;
+	}
+	unlink("/tmp/hl_dispatch.sh");
+	return ack == '0' ? 0 : -1;
+}
+
 static int bash_dispatch(const uint8_t *fc, size_t fc_len)
 {
+	if (hl_driver_restored())
+		g_reseed = 1;
+
+	/* Before a shell kept from the snapshot runs the call.  A shell
+	 * started after the restore seeds $RANDOM from the kernel itself. */
+	if (g_reseed && g_sh_pid >= 0 && bash_reseed() == 0)
+		g_reseed = 0;
+
 	/* The call after one that ended the shell starts a new one. */
-	if (g_sh_pid < 0 && bash_spawn() < 0)
-		return -1;
+	if (g_sh_pid < 0) {
+		if (bash_spawn() < 0)
+			return -1;
+		g_reseed = 0;
+	}
 
 	/* Extract the code string from the FunctionCall FlatBuffer */
 	size_t code_len;
@@ -226,7 +284,7 @@ static int bash_dispatch(const uint8_t *fc, size_t fc_len)
 		}
 	}
 
-	/* Refresh env vars: setenv() here, export lines for the shell. */
+	/* Refresh env vars: set here, export lines for the shell. */
 	struct hl_strbuf env = { 0 };
 	hl_env_refresh(bash_env_visitor, &env);
 	if (env.err) {

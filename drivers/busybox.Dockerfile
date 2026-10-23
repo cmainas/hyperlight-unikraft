@@ -12,7 +12,7 @@
 # An arm64 build is tagged hluk-busybox-arm64 and passed in as BUSYBOX.
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
-RUN apk add --no-cache gcc musl-dev make perl linux-headers
+RUN apk add --no-cache gcc musl-dev make perl linux-headers patch
 
 ARG BUSYBOX_VERSION=1.36.1
 ARG BUSYBOX_SHA256=b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
@@ -33,6 +33,12 @@ RUN set -eux; \
     mv "busybox-${BUSYBOX_VERSION}" /busybox-src
 
 WORKDIR /busybox-src
+
+# hush seeds $RANDOM when RANDOM is assigned, as bash does, so the bash
+# driver can reseed it in each guest restored from a snapshot
+# (docs/random.md).
+COPY drivers/busybox-hush-random-seed.patch /tmp/
+RUN patch -p1 < /tmp/busybox-hush-random-seed.patch
 
 # NOMMU + standalone/NOFORK shell so applets run without fork/exec; PIE so the
 # binary loads at the address Hyperlight maps it to.

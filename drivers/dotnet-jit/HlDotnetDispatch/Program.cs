@@ -25,6 +25,7 @@ using var pipeOut = new FileStream(
 // Warm up Roslyn before signaling ready — the snapshot captures this state,
 // so dispatches after restore skip the warmup cost entirely.
 RoslynCompiler.WarmUp();
+Hyperlight.Reseed.Prepare();
 
 // Redirect Console.In to a raw FileStream on fd 0.
 // The default Console.ReadLine() initialization triggers .NET's signal
@@ -40,13 +41,20 @@ Hyperlight.Host.Attach(pipeIn, pipeOut);
 
 // Dispatch loop, one call per message (drivers/hl_child.h has the
 // protocol): 'E' runs code, 'C' calls a guest function; the answer is
-// 'S', the status, and the result.
+// 'S', the status, and the result.  'R' says the guest was restored,
+// before the call that follows: Reseed.cs.
 var header = new byte[9];
 while (true)
 {
     if (!ReadExactly(pipeIn, header)) return;
     var body = new byte[BitConverter.ToInt64(header, 1)];
     if (!ReadExactly(pipeIn, body)) return;
+    // 'R' has no body today; one sent later is skipped.
+    if (header[0] == (byte)'R')
+    {
+        Hyperlight.Reseed.Run();
+        continue;
+    }
     int off = 0;
     byte[] Field()
     {

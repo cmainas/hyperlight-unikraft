@@ -88,6 +88,10 @@ struct hlcall_hostcall {
 
 #define HLCALL_IOC_HOSTCALL _IOWR('H', 3, struct hlcall_hostcall)
 
+/* How many times the guest has been restored from a snapshot (a
+ * uint64_t): see hl_driver_restored(). */
+#define HLCALL_IOC_RESTORES _IOR('H', 4, uint64_t)
+
 /* The host library's HostCall reply: a tag byte, then the result or the
  * error message (src/lib.rs, dispatch_host_call). */
 #define HL_HOST_CALL_OK 0
@@ -151,6 +155,39 @@ static inline int hl_driver_init(const char *name)
 	}
 	g_hl_call_cap = (size_t)cap;
 	return 0;
+}
+
+/* The restore count hl_driver_restored() last saw. */
+static uint64_t g_hl_restores_seen;
+
+/*
+ * Whether the guest was restored from a snapshot since the last time this
+ * was asked: 1 once per restore, 0 otherwise, and on a kernel without the
+ * count.  A runtime's random generators seeded before the snapshot are
+ * the same in every guest restored from it; a driver asks at the top of
+ * each call and reseeds them when this says so.  The count seen is guest
+ * memory too, so a snapshot keeps it and the next restore differs.
+ */
+static inline int hl_driver_restored(void)
+{
+	static int reported;
+	uint64_t n = 0;
+
+	if (ioctl(g_hl_call_fd, HLCALL_IOC_RESTORES, &n) < 0) {
+		/* ENOTTY is a kernel without the count; anything else is
+		 * worth saying, once: no restore will be seen. */
+		if (errno != ENOTTY && !reported) {
+			fprintf(stderr, "hl_driver: cannot read the restore count: %s\n",
+				strerror(errno));
+			fflush(stderr);
+			reported = 1;
+		}
+		return 0;
+	}
+	if (n == g_hl_restores_seen)
+		return 0;
+	g_hl_restores_seen = n;
+	return 1;
 }
 
 /*
