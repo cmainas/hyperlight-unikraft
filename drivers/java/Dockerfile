@@ -30,7 +30,7 @@ RUN jlink --add-modules java.base,java.compiler,java.logging,java.management,jav
 COPY drivers/java/HlJavaDispatch/src/ /src/java/
 RUN mkdir -p /classes /app && \
     javac --release 25 -d /classes $(find /src/java -name '*.java') && \
-    printf 'Add-Opens: java.base/java.io java.base/java.lang jdk.jshell/jdk.jshell\n' > /manifest && \
+    printf 'Add-Opens: java.base/java.io java.base/java.lang java.base/java.util java.base/java.util.concurrent java.base/jdk.internal.random java.base/sun.security.provider jdk.jshell/jdk.jshell\nAdd-Exports: java.base/jdk.internal.misc\n' > /manifest && \
     jar --create --file /app/hl-java.jar --main-class hyperlight.Dispatch \
         --manifest /manifest -C /classes .
 

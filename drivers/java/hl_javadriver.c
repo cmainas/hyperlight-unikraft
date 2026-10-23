@@ -309,6 +309,14 @@ static int java_dispatch(const uint8_t *fc, size_t fc_len)
 		goto out;
 	}
 
+	/* Restored from a snapshot: the JVM's generators first. */
+	if (hl_driver_restored() && hl_child_send_reseed(g_pipe_to_java) < 0) {
+		fprintf(stderr, "hl_javadriver: the JVM had exited with status %d\n",
+			java_reap());
+		fflush(stderr);
+		goto out;
+	}
+
 	/* Send the call (hl_child.h), then wait for its status.  The read
 	 * blocks and yields to the cooperative scheduler, which switches to
 	 * the JVM. */

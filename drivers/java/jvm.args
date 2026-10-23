@@ -3,8 +3,11 @@
 # it with them to write the CDS archive, which is only used under the
 # options it was written with.  The jar's manifest opens java.io (a
 # FileDescriptor from the pipe fds), java.lang (the host's environment
-# variables, Environment.java) and jdk.jshell (which class is a snippet's,
-# Snippets.java) to it: as --add-opens, they would turn the archive's
+# variables, Environment.java), jdk.jshell (which class is a snippet's,
+# Snippets.java) and, with java.lang, java.util, java.util.concurrent,
+# jdk.internal.random and sun.security.provider (the random generators,
+# Reseed.java) to it, and exports jdk.internal.misc (which of them were
+# used): as --add-opens and --add-exports, they would turn the archive's
 # module graph off.
 #
 # Serial GC: one vCPU, so no GC threads to coordinate.

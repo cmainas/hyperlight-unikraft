@@ -207,3 +207,51 @@ fn go_and_rust_clones_draw_their_own() {
         assert_each_line_differs(&outputs, &[runtime]);
     }
 }
+
+/// Math.random, new Random(), ThreadLocalRandom, SplittableRandom,
+/// RandomGenerator.getDefault(), Collections.shuffle, UUID.randomUUID and
+/// the seeders every DRBG and SHA1PRNG draw from, each used before the
+/// snapshot.
+#[test]
+fn java_clones_draw_their_own() {
+    let builder = SandboxBuilder::from_initrd(require_rootfs("java")).scratch_mb(512);
+    let outputs = two_clones(
+        builder,
+        Exec::Code(
+            "import java.util.*; import java.util.concurrent.*; import java.util.random.*;\n\
+             Math.random(); new Random().nextLong(); ThreadLocalRandom.current().nextLong();\n\
+             new SplittableRandom().nextLong(); RandomGenerator.getDefault().nextLong();\n\
+             Collections.shuffle(new ArrayList<>(List.of(1, 2))); UUID.randomUUID();\n\
+             java.security.SecureRandom.getInstance(\"DRBG\").nextLong();\n\
+             java.security.SecureRandom.getInstance(\"SHA1PRNG\").nextLong();"
+                .into(),
+        ),
+        Exec::Code(
+            "System.out.println(Math.random());\n\
+             System.out.println(new Random().nextLong());\n\
+             System.out.println(ThreadLocalRandom.current().nextLong());\n\
+             System.out.println(new SplittableRandom().nextLong());\n\
+             System.out.println(RandomGenerator.getDefault().nextLong());\n\
+             var l = new ArrayList<Integer>(); for (int i = 0; i < 20; i++) l.add(i);\n\
+             Collections.shuffle(l); System.out.println(l);\n\
+             System.out.println(UUID.randomUUID());\n\
+             System.out.println(java.security.SecureRandom.getInstance(\"DRBG\").nextLong());\n\
+             System.out.println(java.security.SecureRandom.getInstance(\"SHA1PRNG\").nextLong());"
+                .into(),
+        ),
+    );
+    assert_each_line_differs(
+        &outputs,
+        &[
+            "Math.random",
+            "new Random()",
+            "ThreadLocalRandom",
+            "SplittableRandom",
+            "RandomGenerator.getDefault()",
+            "Collections.shuffle",
+            "UUID.randomUUID",
+            "a DRBG made after the restore",
+            "a SHA1PRNG made after the restore",
+        ],
+    );
+}
