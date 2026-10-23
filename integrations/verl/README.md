@@ -69,7 +69,8 @@ The stdlib modules solutions commonly import, and numpy and sympy where the imag
 - Python only.
 - The guest has one CPU and does not preempt threads: a thread spinning on a flag another thread sets never yields to it. `time.process_time()` does not advance (use `time.perf_counter()`), and timer signals (`signal.alarm`, `setitimer`) never fire.
 - No `os.fork()`, and so no `multiprocessing` pools, and no shell: `os.system` and shell commands fail, `subprocess` with `sys.executable` works.
-- Solutions run somewhat slower than on the host, allocation- and I/O-heavy ones up to a few times slower, so one close to the test case timeout may exceed it where Sandbox Fusion would not.
+- Solutions run somewhat slower than on the host, allocation- and I/O-heavy ones up to a few times slower, and many times slower where hluk itself runs in a VM on Apple silicon (nested virtualization), so one close to the test case timeout may exceed it where Sandbox Fusion would not.
+- A solution that runs out of memory can be killed by the guest kernel rather than raise `MemoryError`: its case ends with return code 137, hluk's report of the killed guest, its output is lost, and its stderr holds only hluk's `error: the guest exited with status 137` (as for a solution that exits with 137 itself).
 - Standard input is a file, as on Codeforces, where Sandbox Fusion's is a pipe: `os.fstat(0).st_size` gives its size here.
 
 ## Development

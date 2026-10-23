@@ -488,6 +488,20 @@ needs_hluk = pytest.mark.skipif(
 URL = "hyperlight://" + (os.path.abspath(os.environ["HLUK_INITRD"]) if os.getenv("HLUK_INITRD") else "")
 
 
+# The memory tests' run timeout: on the Linux arm64 runners (VMs on Apple silicon, so nested
+# virtualization) the guest's first touch of each page is many times slower. Touching 900 MiB
+# outran a 30 s timeout there, and filling a 405 MiB guest a 10 s one; on x86 both take 1-3 s.
+MEMORY_TEST_TIMEOUT = 120
+
+
+def _why(response, error):
+    """A real case's outcome, for an assertion message: its status and the ends of its output."""
+    if not response or not response.get("run_result"):
+        return response, error
+    r = response["run_result"]
+    return {**r, "stdout": r["stdout"][-300:], "stderr": r["stderr"][-300:]}
+
+
 def _score(code, inputs, outputs):
     """The pass rate as verl scores Sandbox Fusion's replies: a case passes when the solution
     finished and its stdout, trailing newlines aside, is the expected output."""
@@ -803,15 +817,24 @@ def test_real_memory_limit_is_the_solutions():
     # memory_limit_mb is what the solution may allocate, as under Sandbox Fusion, not the VM's
     # whole memory, which also holds the guest's kernel and interpreter.
     code = "x = bytearray(900 << 20)\nx[::4096] = b'\\x01' * len(x[::4096])\nprint('ok')"
-    response, _ = run_case(URL, code, None, 30, 1024)
-    assert response["run_result"]["stdout"] == "ok\n", response["run_result"]["stderr"][-300:]
+    response, error = run_case(URL, code, None, MEMORY_TEST_TIMEOUT, 1024)
+    why = _why(response, error)
+    assert response and response["run_result"], why
+    assert response["status"] == "Success" and response["run_result"]["stdout"] == "ok\n", why
 
 
 @needs_hluk
 def test_real_memory_limit():
-    response, _ = run_case(URL, "x = bytearray(512 * 1024 * 1024)", None, 10, 256)
-    assert response["status"] == "Failed"
-    assert response["run_result"]["return_code"] != 0
+    response, error = run_case(URL, "x = bytearray(512 * 1024 * 1024)", None, MEMORY_TEST_TIMEOUT, 256)
+    why = _why(response, error)
+    assert response and response["run_result"], why
+    r = response["run_result"]
+    # Out of memory, not out of time or some other crash: Python's MemoryError, or the guest
+    # kernel killing the process when it touches a page there is no memory for, which hluk
+    # reports as the guest exiting with 137 (the kernel's own message goes to its log; this
+    # solution does not exit with 137 itself)
+    assert r["status"] == "Finished", why
+    assert (r["return_code"] == 1 and "MemoryError" in r["stderr"]) or r["return_code"] == 137, why
 
 
 def test_url_detection():
