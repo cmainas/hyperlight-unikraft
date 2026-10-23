@@ -21,6 +21,11 @@
  *
  *   'S', a status byte, and the result as a field (empty for none).
  *
+ * The driver may also send 'R' and a zero length before a call: the
+ * guest was restored from a snapshot, so the child reseeds the random
+ * generators its runtime seeded before it.  The child answers nothing to
+ * 'R' and reads the call that follows.
+ *
  * Lengths are little-endian.  Include hl_driver.h first.
  */
 
@@ -108,6 +113,16 @@ static int hl_child_send(int fd, int is_call, const void *env, size_t env_len,
 	    hl_child_write_field(fd, code, code_len) < 0)
 		return -1;
 	return is_call ? hl_child_write_field(fd, input, input_len) : 0;
+}
+
+/* Tell the child the guest was restored (hl_driver_restored()): 'R'.
+ * -1 if the child is gone. */
+static int hl_child_send_reseed(int fd)
+{
+	/* 'R' and a zero length, in one write. */
+	static const unsigned char msg[9] = { 'R' };
+
+	return hl_write_all(fd, msg, sizeof(msg));
 }
 
 /* Make the child's host function call and send the reply.  -1 if the

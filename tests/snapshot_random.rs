@@ -142,6 +142,57 @@ fn agent_clones_draw_their_own() {
     assert_each_line_differs(&outputs, &["numpy", "cryptography"]);
 }
 
+/// Math.random, OpenSSL (crypto.randomBytes) and the bytes randomUUID()
+/// and randomInt() keep ahead, each used before the snapshot.
+#[test]
+fn node_clones_draw_their_own() {
+    let builder = SandboxBuilder::from_initrd(require_rootfs("node")).scratch_mb(512);
+    let outputs = two_clones(
+        builder,
+        Exec::Code(
+            "const c = require('crypto');\n\
+             Math.random(); c.randomBytes(16); c.randomUUID(); globalThis.crypto.randomUUID(); c.randomInt(10);"
+                .into(),
+        ),
+        Exec::Code(
+            "const c = require('crypto');\n\
+             console.log(Math.random());\n\
+             console.log(c.randomBytes(16).toString('hex'));\n\
+             console.log(c.randomUUID());\n\
+             console.log(globalThis.crypto.randomUUID());\n\
+             console.log(c.randomInt(2 ** 40));"
+                .into(),
+        ),
+    );
+    assert_each_line_differs(
+        &outputs,
+        &[
+            "Math.random",
+            "OpenSSL",
+            "crypto.randomUUID",
+            "webcrypto randomUUID",
+            "crypto.randomInt",
+        ],
+    );
+}
+
+/// Math.random keeps what Math.random promises: a double in [0, 1).
+#[test]
+fn node_math_random_stays_in_range() {
+    let mut sandbox = SandboxBuilder::from_initrd(require_rootfs("node"))
+        .scratch_mb(512)
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            "let ok = true, sum = 0;\n\
+             for (let i = 0; i < 100000; i++) { const x = Math.random(); ok = ok && x >= 0 && x < 1; sum += x; }\n\
+             console.log(ok, Math.abs(sum / 100000 - 0.5) < 0.01, Math.random.name, Math.random.length);",
+        )
+        .unwrap();
+    assert_eq!(sandbox.drain_output().trim(), "true true random 0");
+}
+
 /// A program the exec driver starts runs after the restore, so what its
 /// runtime seeds (Go's math/rand from AT_RANDOM, Rust's HashMap keys from
 /// getrandom) seeds from the kernel, reseeded: nothing for a driver to
