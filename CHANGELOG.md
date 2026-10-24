@@ -4,6 +4,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Prerelease] - Unreleased
 
+## [v0.19.1]
+
 ### Added
 
 - A PHP RCE containment demo (`demos/php2shell`): a payload that runs as if a PHP engine flaw had handed an attacker code execution reaches host secrets, a C2 and a persistent webshell on bare metal, and is contained on every phase inside an hluk micro-VM (read-only mount, no network). Run with `just demos php2shell`.
@@ -14,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Snapshots saved by v0.19.0 and earlier releases are refused (the kernel changed); save them again.
 - CI: pull requests labelled `ci/arm64` no longer run on the Linux arm64 runner, which `ci-passed` no longer waits for, and pushes to `main` no longer run the arm64 tests, only refresh the arm64 guest images' cache: the nightly run tests both. `ci-passed` counts only the pull request's own arm64 run, not one started by hand. Dependabot no longer labels the actions' updates `ci/arm64`.
 
 ### Fixed
