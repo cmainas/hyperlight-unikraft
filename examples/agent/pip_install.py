@@ -16,7 +16,10 @@ print(f"Installing {pkg}...")
 r = subprocess.run(
     [sys.executable, "-m", "pip", "install",
      "--target", "/tmp/pkgs", "--quiet", pkg],
-    capture_output=True, text=True, timeout=60,
+    # Generous: pip's cold start plus the network fetch runs well under a
+    # minute interactively, but the nightly's nested-virt arm64 runner is
+    # slow enough to blow past 60 s (hyperlight-dev/hyperlight-unikraft#203).
+    capture_output=True, text=True, timeout=180,
 )
 
 if r.returncode == 0:
