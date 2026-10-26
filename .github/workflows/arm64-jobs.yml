@@ -474,11 +474,13 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.plan.outputs.hosts) }}
         runtime: [python, python-shell, agent]
-        # agent only in tier 3, and on Linux only on Sundays (see the top of
-        # arm64.yml).
+        # agent runs in tier 3 only (excluded on pull requests), and never on
+        # the Linux arm64 runner: it has no agent ceilings (charts only, never
+        # gates) and the agent suite overruns the job's time budget there
+        # (see the top of arm64.yml, and #207).
         exclude:
           - runtime: ${{ needs.plan.outputs.scope == 'change' && 'agent' || '' }}
-          - os: ${{ needs.plan.outputs.scope != 'weekly' && 'linux' || '' }}
+          - os: linux
             runtime: agent
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

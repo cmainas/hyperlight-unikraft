@@ -18,9 +18,11 @@ name: arm64
 # - Tier 3, nightly on main, blocking nothing: all three hosts, Linux
 #   included.  Its runner is a small VM (2 CPUs, 3 GB) whose guests run
 #   under nested virtualization, where a guest's first touch of each page is
-#   slow: there the agent, Java, node, .NET JIT and PowerShell suites, and
-#   the agent benchmarks, take hours (agent's about 30 times as long as on
-#   the Mac), so they run on Sundays' run only.  ci-report.yml re-runs a
+#   slow: there the agent, Java, node, .NET JIT and PowerShell suites take
+#   hours (agent's about 30 times as long as on the Mac), so they run on
+#   Sundays' run only.  The agent benchmark is slower still (it overran even
+#   the Sunday job's timeout), and the Linux runner has no agent ceilings to
+#   gate, so it does not run there at all (#207).  ci-report.yml re-runs a
 #   failed nightly once, then files what still fails as issues.
 #
 # A push to main tests nothing, as the next nightly run does.  Its run only
@@ -31,7 +33,7 @@ on:
   workflow_dispatch:
     inputs:
       weekly:
-        description: "Sunday's suites too: Linux's slow ones and its agent benchmarks"
+        description: "Sunday's suites too: Linux's slow ones"
         type: boolean
         default: false
   schedule:
