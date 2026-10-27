@@ -12,7 +12,7 @@ CI runs in three tiers, by how much of the hosts' time a change can take. These 
 
 ## Tier 1: every change
 
-[`ci.yml`](../.github/workflows/ci.yml): lint, spell check, the kernel's build, the guest images, the Rust tests, the static Linux binaries, the demos, the integrations (smolagents, MCP, verl and ClickHouse, those last two on Linux only), CPython's conformance suite and the benchmarks, on Linux and Windows. It also builds and runs the unit tests on hosted arm64 runners (macOS, Linux, Windows), which can boot no guest.
+[`ci.yml`](../.github/workflows/ci.yml): lint, spell check, the kernel's build, the guest images, the Rust tests, the static Linux binaries, the demos, the integrations (smolagents, MCP, verl, the OpenAI Agents SDK and ClickHouse, those last three on Linux only), CPython's conformance suite and the benchmarks, on Linux and Windows. It also builds and runs the unit tests on hosted arm64 runners (macOS, Linux, Windows), which can boot no guest.
 
 A pull request runs what its files call for:
 
