@@ -138,6 +138,43 @@ fn c_vfork_parent_waits_for_its_child() {
     );
 }
 
+/// mremap() resizes a mapping in place, with Linux's errors, and musl's
+/// probes with it find the main thread's whole stack, not one page.
+#[test]
+fn c_mremap_resizes_in_place() {
+    let (status, output) = run_c_check("mremap");
+    assert!(
+        status.is_ok() && output.contains("mremap: all checks pass"),
+        "expected every mremap check to pass, got {status:?}: {output}"
+    );
+}
+
+/// What a process maps goes when it ends, by exit, a signal or an exec
+/// from a thread: 56 children that each map 16 MiB run in a 64 MiB guest.
+/// A thread that execs a program without libc leaves the kernel no stale
+/// child TID to write when that program exits.
+#[test]
+fn c_process_memory_is_released() {
+    require_bin("c", "no_libc");
+    let (status, output) = run_c_check("process_memory");
+    assert!(
+        status.is_ok() && output.contains("process memory: all checks pass"),
+        "expected every process memory check to pass, got {status:?}: {output}"
+    );
+}
+
+/// munmap() and mprotect() of a range that begins in a 2 MiB block with
+/// nothing mapped reach the pages past the boundary: they once kept their
+/// memory, which a later mapping there read, and their protection.
+#[test]
+fn c_page_boundary_unmap_and_protect() {
+    let (status, output) = run_c_check("page_boundary");
+    assert!(
+        status.is_ok() && output.contains("page boundary: all checks pass"),
+        "expected every page boundary check to pass, got {status:?}: {output}"
+    );
+}
+
 /// Run a C check program, keeping its output when it fails: the output
 /// says which check did.
 fn run_c_check(name: &str) -> (hyperlight_unikraft::Result<()>, String) {

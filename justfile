@@ -814,10 +814,14 @@ build-test-bins:
         -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" "$alpine" sh -c '
             set -eu
             apk add --no-cache gcc musl-dev linux-headers >/dev/null
-            for src in condvar futex_requeue sigsuspend vfork_wake; do
+            for src in condvar futex_requeue sigsuspend vfork_wake mremap process_memory page_boundary; do
                 gcc -O2 -Wall -static-pie -fPIE -pthread -o /out/$src /c/$src.c
                 chown "$HOST_UID:$HOST_GID" /out/$src
-            done'
+            done
+            # process_memory execs it: a program that never calls
+            # set_tid_address(), as a Go binary does not.
+            gcc -O2 -Wall -static-pie -fPIE -nostdlib -o /out/no_libc /c/no_libc.c
+            chown "$HOST_UID:$HOST_GID" /out/no_libc'
     echo "==> Rust"
     # The pinned toolchain first: `target add` installing it by itself is
     # deprecated in rustup.
