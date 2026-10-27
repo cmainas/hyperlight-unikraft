@@ -40,13 +40,13 @@ Agent: A micro-VM is a lightweight virtual machine that boots in milliseconds
 
 Why the build looks the way it does:
 
-- **SSE-only llama.cpp.** The guest CPU exposes SSE/SSE2/SSE4 but **not AVX/AVX2**. The prebuilt `llama-cpp-python` wheels assume AVX2 and crash with an illegal instruction, so the `Dockerfile` compiles llama.cpp from source with `-DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF`.
+- **SSE-only llama.cpp.** The prebuilt `llama-cpp-python` wheels assume AVX2, which the guest did not enable when this example was written (the kernel now enables AVX the first time a program uses it; the example has not been moved over), so the `Dockerfile` compiles llama.cpp from source with `-DGGML_AVX=OFF -DGGML_AVX2=OFF -DGGML_FMA=OFF -DGGML_F16C=OFF`.
 - **OpenMP off** (`-DGGML_OPENMP=OFF`) to avoid a libgomp runtime dependency; ggml falls back to pthreads.
 - **Small buffers, no mmap.** `n_ctx=512`, `n_batch=64`, and `use_mmap=False` keep the compute buffers inside the identity-mapped guest memory.
 
 The rootfs is ~540 MB (it bakes in the ~380 MB model), and the whole cpio is extracted into the guest ramfs on boot; `use_mmap=False` then reads the model into a second buffer. So the guest needs ~1.5 GB of scratch — `--scratch-mb 1536` is the floor here (1024/1280 fail to even extract the rootfs); more is fine.
 
-Generation is a few tokens/sec because the guest is a **single vCPU** and the model runs **SSE-only** (the guest CPU exposes no AVX/AVX2, so llama.cpp is compiled without them) with OpenMP off. It's scalar inference on one core; that's a guest-capability limit, not a config to tune.
+Generation is a few tokens/sec because the guest is a **single vCPU** and the model runs **SSE-only** (llama.cpp is compiled without AVX/AVX2) with OpenMP off. It's scalar inference on one core.
 - **stdlib stubs.** `local.py` registers no-op `multiprocessing`/`sqlite3` stubs that `llama-cpp-python` imports transitively but this example never uses; they are ignored when the real modules are present.
 
 Both rootfses extend `python-shell` (build it first with `just build-rootfs python-shell`). The local build compiles llama.cpp and downloads a ~400 MB model, so it takes several minutes.
