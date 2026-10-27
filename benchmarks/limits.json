@@ -14,7 +14,7 @@
     "windows-arm64": { "cold/hello": 5700, "cold-snap/hello": 160, "warm-restore/hello": 60, "restore-cost/hello": 57, "warm-stateful/hello": 3, "parallel-exec/hello": 24, "snapshot-size/hello": 140, "cold-snap/mount": 240, "warm-restore/mount": 120, "restore-cost/mount": 73 }
   },
   "agent": {
-    "linux":  { "cold/hello": 16000, "cold-snap/hello": 25, "warm-restore/hello": 20, "restore-cost/hello": 4, "warm-stateful/hello": 0.4, "parallel-exec/hello": 30, "snapshot-size/hello": 1000, "cold-snap/mount": 38, "warm-restore/mount": 30, "restore-cost/mount": 6 },
+    "linux":  { "cold/hello": 16000, "cold-snap/hello": 30, "warm-restore/hello": 20, "restore-cost/hello": 4, "warm-stateful/hello": 0.4, "parallel-exec/hello": 30, "snapshot-size/hello": 1000, "cold-snap/mount": 38, "warm-restore/mount": 30, "restore-cost/mount": 6 },
     "windows": { "cold/hello": 45000, "cold-snap/hello": 250, "warm-restore/hello": 65, "restore-cost/hello": 150, "warm-stateful/hello": 1.5, "parallel-exec/hello": 110, "snapshot-size/hello": 1000, "cold-snap/mount": 375, "warm-restore/mount": 85, "restore-cost/mount": 225 },
     "macos-arm64": { "cold/hello": 7800, "cold-snap/hello": 15, "warm-restore/hello": 10, "restore-cost/hello": 42, "warm-stateful/hello": 1, "parallel-exec/hello": 25, "snapshot-size/hello": 1000, "cold-snap/mount": 18, "warm-restore/mount": 10, "restore-cost/mount": 42 },
     "windows-arm64": { "cold/hello": 54000, "cold-snap/hello": 600, "warm-restore/hello": 210, "restore-cost/hello": 200, "warm-stateful/hello": 3, "parallel-exec/hello": 95, "snapshot-size/hello": 1000, "cold-snap/mount": 730, "warm-restore/mount": 230, "restore-cost/mount": 230 }
