@@ -60,6 +60,7 @@ updates:
   # The Python integrations, libraries whose ranges CI tests at both ends
   # (the integrations job's oldest and newest legs): widened, never raised,
   # so a new major past a cap comes as a pull request and the floors stay.
+  # auto, which widens a library's ranges: the schema takes no widen here.
   # Without ci/arm64, as tier 2 would run all of itself for them: a release
   # with no arm64 wheel shows in the nightly run.
   - package-ecosystem: pip
@@ -72,7 +73,7 @@ updates:
       interval: monthly
     cooldown:
       default-days: 7
-    versioning-strategy: widen
+    versioning-strategy: auto
     labels: [dependencies]
     groups:
       python:
