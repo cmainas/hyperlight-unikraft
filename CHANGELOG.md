@@ -4,6 +4,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Prerelease] - Unreleased
 
+### Fixed
+
+- Memory a program mapped with `mmap()` stayed mapped after its process ended, so a guest that ran child processes again and again (Azure CLI running Bicep) ran out of memory. The kernel now unmaps what a process mapped when it exits, is killed or execs; memory shared with `CLONE_VM` stays until the last process sharing it ends. In the `java` image, a JVM started after `System.exit()` gets the heap the first had, and restarts are no longer refused once the old JVMs' memory runs out.
+- `munmap()` and `mprotect()` of a range that began in a 2 MiB block with nothing mapped yet missed pages past the block's end: they stayed mapped, with their memory, which a mapping made there later read, or kept their protection.
+- `mremap()` failed with `ENOSYS`, so musl took the main thread's stack for a single page (`pthread_getattr_np()`), and .NET's `EnsureSufficientExecutionStack` failed. A mapping now shrinks, or grows into free space after it, in place; `MREMAP_MAYMOVE` resizes in place too and fails with `ENOMEM` where only a move would do, and `realloc()` then copies.
+
 ## [v0.19.1]
 
 ### Added

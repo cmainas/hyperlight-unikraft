@@ -34,8 +34,7 @@
  * compiles to its own assembly, which stays loaded, statics and all.
  * Environment.Exit() ends the process, which is the runtime: the call
  * ends with that exit status, and the next call starts a fresh one,
- * warm-up included.  Until the kernel returns an exited process's
- * memory, that fresh one needs the room for a second runtime.
+ * warm-up included, in the memory the old one gave back.
  */
 
 #include <signal.h>

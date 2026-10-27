@@ -285,14 +285,13 @@ fn dotnet_jit_thread_runs_between_calls() {
 }
 
 /// `Environment.Exit()` ends the .NET process, which is the runtime: the
-/// call ends with that status, and the next call starts a fresh one.
-/// The fresh runtime needs the room for a second one, 1024 MB here,
-/// until the kernel returns an exited process's memory.
+/// call ends with that status, and the next call starts a fresh one, in
+/// the image's memory (768 MiB): the old runtime gave its own back.
 #[test]
 fn dotnet_jit_environment_exit_ends_the_call() {
     let rootfs = require_rootfs("dotnet-jit");
     let mut sandbox = SandboxBuilder::from_initrd(rootfs.clone())
-        .scratch_mb(1024)
+        .scratch_mb(768)
         .boot()
         .unwrap();
     sandbox

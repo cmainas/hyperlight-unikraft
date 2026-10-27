@@ -209,11 +209,11 @@ modules = [
 
 [may-fix.posix]
 reason = "Incomplete POSIX syscall implementation"
-todo = "Implement missing syscalls (fcntl locking, ioctl, mremap) in Unikraft"
+todo = "Implement missing syscalls (fcntl locking, ioctl) and MAP_SHARED file mappings in Unikraft"
 modules = [
     "test_fcntl",               # FAIL  — file locking (fcntl/flock)
     "test_ioctl",               # ERROR — ioctl operations
-    "test_mmap",                # FAIL  — mremap() is a non-functional stub
+    "test_mmap",                # ERROR — MAP_SHARED file mappings (EOPNOTSUPP)
     "test_re",                  # FAIL  — regex edge cases (likely locale-dependent)
 ]
 

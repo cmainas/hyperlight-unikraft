@@ -1400,13 +1400,13 @@ fn python_echo_output() {
 
 /// Children after and from threads, waits, kills, timeouts, sessions and
 /// process groups: what an agent's command runner does with processes.
-/// 1 GiB: the kernel keeps an exited process's memory (about 15 MiB a
-/// Python), and the demo starts over thirty of them.
+/// Over thirty Pythons, one after another, in the image's 256 MiB: each
+/// gives its memory back when it ends.
 #[test]
 fn python_processes() {
     let rootfs = require_rootfs("python");
     let mut sandbox = SandboxBuilder::from_initrd(rootfs)
-        .scratch_mb(1024)
+        .scratch_mb(256)
         .boot()
         .unwrap();
 

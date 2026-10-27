@@ -31,9 +31,8 @@
  *
  * The JVM stays alive across dispatches.  System.exit() ends it, which
  * is the runtime: the call ends with that exit status, and the next call
- * starts a fresh one, warm-up included, while the memory allows: until
- * the kernel returns an exited process's memory, each one needs the room
- * for another runtime.
+ * starts a fresh one, warm-up included, in the memory the old one gave
+ * back.
  */
 
 #include <signal.h>
@@ -62,9 +61,9 @@ static int g_pipe_from_java = -1;  /* parent reads the status here */
  * call, as it does for the first JVM. */
 static char **g_java_envp;
 
-/* What the boot JVM took, warm-up included, in MiB: the kernel does not
- * return an exited process's memory, so each JVM after System.exit() takes
- * that much more, and one started without the room crashes the guest. */
+/* What the boot JVM took, warm-up included, in MiB: a JVM started after
+ * System.exit() needs as much, and one started without the room (the code
+ * left processes behind that hold it) crashes the guest. */
 static unsigned long g_java_mb;
 extern char **environ;
 
@@ -169,17 +168,12 @@ static int java_spawn(void)
 	snprintf(fd_in_str, sizeof(fd_in_str), "%d", pipe_code[0]);
 	snprintf(fd_out_str, sizeof(fd_out_str), "%d", pipe_ack[1]);
 	/* The heap is a share (jvm.args) of what the JVM takes for the guest's
-	 * memory: what is free, not the total, which a JVM started after
-	 * System.exit() shares with the ones before it, whose memory the
-	 * kernel keeps.  Sized from the total, its heap would outgrow the
-	 * memory left, and an allocation fault the guest instead of throwing
-	 * OutOfMemoryError. */
-	unsigned long free_mb = java_free_mb();
-
-	/* A JVM after the first also needs room for itself, what the first
-	 * took: its heap's share is of the rest. */
-	snprintf(max_ram, sizeof(max_ram), "-XX:MaxRAM=%luM",
-		 g_java_mb && free_mb > g_java_mb ? free_mb - g_java_mb : free_mb);
+	 * memory: what is free, not the total, which the driver and whatever
+	 * the code left running share.  Sized from the total, its heap would
+	 * outgrow the memory left, and an allocation fault the guest instead
+	 * of throwing OutOfMemoryError.  A JVM after System.exit() gets the
+	 * memory of the one before it back, so this is what the first had. */
+	snprintf(max_ram, sizeof(max_ram), "-XX:MaxRAM=%luM", java_free_mb());
 	memcpy(argv, java_argv, sizeof(argv));
 	argv[2] = max_ram;
 	argv[JAVA_ARGC] = fd_in_str;
@@ -286,14 +280,15 @@ static int java_dispatch(const uint8_t *fc, size_t fc_len)
 	/* The call after one that ended the child starts a new one. */
 	if (g_java_pid < 0) {
 		/* Twice what the first took: room for the JVM, and a heap of
-		 * half that (java_spawn). */
+		 * half that (java_spawn).  The old JVM's memory is back,
+		 * unless processes it started still hold it. */
 		unsigned long free_mb = java_free_mb();
 
 		if (free_mb < g_java_mb * 2) {
 			fprintf(stderr, "hl_javadriver: %lu MiB left, too little for a fresh JVM "
-				"(the first took %lu): an exited JVM's memory is not given "
-				"back, so restore the sandbox from a snapshot or give it "
-				"more memory\n", free_mb, g_java_mb);
+				"(the first took %lu): processes the code started may "
+				"still hold the memory, so restore the sandbox from a "
+				"snapshot or give it more memory\n", free_mb, g_java_mb);
 			fflush(stderr);
 			goto out;
 		}

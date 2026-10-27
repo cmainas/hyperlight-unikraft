@@ -4,10 +4,10 @@
 	branch = plat-hyperlight-v2
 [submodule "kernel/app-elfloader"]
 	path = kernel/app-elfloader
-	# The fork, for three fixes: arm64 AT_HWCAP (upstream has it in another
+	# The fork, for four fixes: arm64 AT_HWCAP (upstream has it in another
 	# form, which needs a Unikraft change our plat-hyperlight-v2 kernel
-	# lacks), AT_RANDOM on the program's stack, and empty argument and
-	# environment strings, until they are upstream.
+	# lacks), AT_RANDOM and AT_EXECFN on the program's stack, and empty
+	# argument and environment strings, until they are upstream.
 	url = https://github.com/danbugs/app-elfloader.git
 	branch = plat-hyperlight-v2
 [submodule "kernel/libs/libelf"]
