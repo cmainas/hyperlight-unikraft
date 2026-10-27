@@ -4,6 +4,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Prerelease] - Unreleased
 
+### Fixed
+
+- Memory a program mapped with `mmap()` stayed mapped after its process ended, so a guest that ran child processes again and again (Azure CLI running Bicep) ran out of memory. The kernel now unmaps what a process mapped when it exits, is killed or execs; memory shared with `CLONE_VM` stays until the last process sharing it ends. In the `java` image, a JVM started after `System.exit()` gets the heap the first had, and restarts are no longer refused once the old JVMs' memory runs out.
+- `munmap()` and `mprotect()` of a range that began in a 2 MiB block with nothing mapped yet missed pages past the block's end: they stayed mapped, with their memory, which a mapping made there later read, or kept their protection.
+- `mremap()` failed with `ENOSYS`, so musl took the main thread's stack for a single page (`pthread_getattr_np()`), and .NET's `EnsureSufficientExecutionStack` failed. A mapping now shrinks, or grows into free space after it, in place; `MREMAP_MAYMOVE` resizes in place too and fails with `ENOMEM` where only a move would do, and `realloc()` then copies.
+- Static programs linked against a glibc built for x86-64-v3, as Ubuntu 26.04's is, died with `SIGILL` before `main()`: the guest never turned AVX on, and that glibc uses AVX2 without checking. The kernel now enables AVX the first time a program uses it, and AVX-512 the first time one uses that, and turns them back on after restoring a snapshot taken since. Until then CPUID reports OSXSAVE clear, so programs that check for AVX properly keep to SSE: with AVX on, every VM exit costs more on nested AMD hosts (agent cold-snap ~33 → ~48 ms on GitHub's runners). Restoring a snapshot taken before turns AVX off again.
+
 ## [v0.19.1]
 
 ### Added

@@ -138,6 +138,101 @@ fn c_vfork_parent_waits_for_its_child() {
     );
 }
 
+/// mremap() resizes a mapping in place, with Linux's errors, and musl's
+/// probes with it find the main thread's whole stack, not one page.
+#[test]
+fn c_mremap_resizes_in_place() {
+    let (status, output) = run_c_check("mremap");
+    assert!(
+        status.is_ok() && output.contains("mremap: all checks pass"),
+        "expected every mremap check to pass, got {status:?}: {output}"
+    );
+}
+
+/// AVX is off until a program uses it, then on: a blocked thread keeps its
+/// SSE registers across the switch, and AVX registers survive another
+/// thread using them.  Restoring a snapshot from before turns AVX off
+/// again; one from after keeps it on, in this VM or a new one.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn c_avx_is_enabled_on_first_use() {
+    use hyperlight_unikraft::{AppSandbox, Exec};
+
+    fn run(sandbox: &mut AppSandbox, args: &str, expect: &str) {
+        let status = sandbox.run(Exec::Guest(format!("{BIN_MOUNT}/lazy_avx{args}")));
+        let output = sandbox.drain_output();
+        assert!(
+            status.is_ok() && output.contains(expect),
+            "expected `{expect}` from lazy_avx{args}, got {status:?}: {output}"
+        );
+    }
+
+    let mut sandbox = SandboxBuilder::from_initrd(require_rootfs("c"))
+        .scratch_mb(64)
+        .mounts(vec![Mount::rw(require_bin("c", "lazy_avx"), BIN_MOUNT)])
+        .boot()
+        .unwrap();
+    let before = sandbox.snapshot().unwrap();
+    let status = sandbox.run(Exec::Guest(format!("{BIN_MOUNT}/lazy_avx")));
+    let output = sandbox.drain_output();
+    if status.is_ok() && output.contains("lazy avx: no AVX on this CPU") {
+        return;
+    }
+    assert!(
+        status.is_ok() && output.contains("lazy avx: all checks pass"),
+        "expected every lazy AVX check to pass, got {status:?}: {output}"
+    );
+    let dir = temp_dir("lazy-avx");
+    let after = sandbox.snapshot_to(dir.path()).unwrap();
+
+    sandbox.restore(before).unwrap();
+    run(&mut sandbox, "", "lazy avx: all checks pass");
+    sandbox.restore(after).unwrap();
+    run(
+        &mut sandbox,
+        " restored",
+        "lazy avx: restored, all checks pass",
+    );
+
+    // The same snapshot loaded into a new VM
+    let mut resumed = SandboxBuilder::from_snapshot_dir(dir.path())
+        .unwrap()
+        .mounts(vec![Mount::rw(require_bin("c", "lazy_avx"), BIN_MOUNT)])
+        .boot()
+        .unwrap();
+    run(
+        &mut resumed,
+        " restored",
+        "lazy avx: restored, all checks pass",
+    );
+}
+
+/// What a process maps goes when it ends, by exit, a signal or an exec
+/// from a thread: 56 children that each map 16 MiB run in a 64 MiB guest.
+/// A thread that execs a program without libc leaves the kernel no stale
+/// child TID to write when that program exits.
+#[test]
+fn c_process_memory_is_released() {
+    require_bin("c", "no_libc");
+    let (status, output) = run_c_check("process_memory");
+    assert!(
+        status.is_ok() && output.contains("process memory: all checks pass"),
+        "expected every process memory check to pass, got {status:?}: {output}"
+    );
+}
+
+/// munmap() and mprotect() of a range that begins in a 2 MiB block with
+/// nothing mapped reach the pages past the boundary: they once kept their
+/// memory, which a later mapping there read, and their protection.
+#[test]
+fn c_page_boundary_unmap_and_protect() {
+    let (status, output) = run_c_check("page_boundary");
+    assert!(
+        status.is_ok() && output.contains("page boundary: all checks pass"),
+        "expected every page boundary check to pass, got {status:?}: {output}"
+    );
+}
+
 /// Run a C check program, keeping its output when it fails: the output
 /// says which check did.
 fn run_c_check(name: &str) -> (hyperlight_unikraft::Result<()>, String) {

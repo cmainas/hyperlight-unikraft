@@ -415,79 +415,48 @@ fn java_an_interrupt_does_not_carry_over() {
     assert_eq!(sandbox.drain_output(), "slept\n");
 }
 
-/// Each JVM after `System.exit()` takes memory the kernel does not give
-/// back: a restart without the room for one fails the call, with why,
-/// instead of crashing the guest.
+/// A JVM ended by `System.exit()` gives its memory back: the next one
+/// starts in it, with the heap the first had, as often as the code exits.
 #[test]
-fn java_restarts_stop_short_of_running_out_of_memory() {
-    let mut sandbox = boot();
-    let mut refused = false;
-    for _ in 0..6 {
-        sandbox.run("System.exit(0);").unwrap_or(());
-        if let Err(e) = sandbox.run("System.out.println(\"alive\");") {
-            assert!(matches!(e, Error::CallFailed { .. }), "{e:?}");
-            refused = true;
-            break;
-        }
-    }
-    assert!(
-        refused,
-        "every restart had room: the guest is larger than this test expects"
-    );
-    assert!(
-        sandbox
-            .drain_output()
-            .contains("too little for a fresh JVM")
-    );
-    // Refused, not crashed: the sandbox still answers.
-    assert!(matches!(
-        sandbox.run("System.out.println(1);"),
-        Err(Error::CallFailed { .. })
-    ));
-}
-
-/// A JVM started after `System.exit()` sizes its heap from the memory left
-/// after it, so running out is still an OutOfMemoryError the code can
-/// catch, after every restart the driver allows.
-#[test]
-fn java_a_restarted_jvm_still_throws_out_of_memory() {
+fn java_restarts_get_the_memory_back() {
     let mut sandbox = boot();
     let max = |s: &mut hyperlight_unikraft::AppSandbox| -> u64 {
         s.run("System.out.println(Runtime.getRuntime().maxMemory() >> 20);")
             .unwrap();
         s.drain_output().trim().parse().unwrap()
     };
+    let first = max(&mut sandbox);
+    for restart in 1..=6 {
+        sandbox.run("System.exit(0);").unwrap();
+        let heap = max(&mut sandbox);
+        assert!(
+            heap * 10 >= first * 9,
+            "restart {restart}: heap {heap} MiB, first {first} MiB"
+        );
+    }
+}
+
+/// A JVM started after `System.exit()` sizes its heap from the memory free
+/// then, so running out is still an OutOfMemoryError the code can catch,
+/// after each restart.
+#[test]
+fn java_a_restarted_jvm_still_throws_out_of_memory() {
+    let mut sandbox = boot();
     let fill = concat!(
         "var keep = new ArrayList<byte[]>();\n",
         "try { while (true) keep.add(new byte[1 << 20]); }\n",
         "catch (OutOfMemoryError e) { int n = keep.size(); keep = null; System.out.println(\"oom after \" + n); }\n",
     );
-    let first = max(&mut sandbox);
-    let mut restarts = 0;
-    loop {
+    sandbox.run(fill).unwrap();
+    assert!(sandbox.drain_output().contains("oom after"));
+    for restart in 1..=3 {
         sandbox.run("System.exit(0);").unwrap();
-        if sandbox.run("System.out.println(\"up\");").is_err() {
-            break;
-        }
-        sandbox.drain_output();
-        restarts += 1;
-        let heap = max(&mut sandbox);
-        assert!(
-            heap < first,
-            "restart {restarts}: heap {heap} MiB, first {first} MiB"
-        );
         sandbox.run(fill).unwrap();
         assert!(
             sandbox.drain_output().contains("oom after"),
-            "restart {restarts}"
+            "restart {restart}"
         );
     }
-    assert!(restarts >= 1, "no restart had room");
-    assert!(
-        sandbox
-            .drain_output()
-            .contains("too little for a fresh JVM")
-    );
 }
 
 /// The value an expression leaves ($1) is freed, and a variable declared
