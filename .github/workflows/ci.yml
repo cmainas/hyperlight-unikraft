@@ -24,7 +24,8 @@ jobs:
   # What a pull request's files call for, for the other jobs' `if`s:
   # - full: everything, for any file not named below;
   # - core: lint and the test job, for changes to integrations/ alone;
-  # - packages: the integrations job's packages (smolagents, mcp, verl), as JSON;
+  # - packages: the integrations job's packages (smolagents, mcp, verl,
+  #   openai-agents), as JSON;
   # - clickhouse: the clickhouse job.
   # Documentation alone (markdown, docs/, site/, which site.yml builds) calls
   # for none of them: typos checks it.  The ci/integrations label adds every
@@ -52,7 +53,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          full=true core=true packages='["smolagents", "mcp", "verl"]' clickhouse=true
+          full=true core=true packages='["smolagents", "mcp", "verl", "openai-agents"]' clickhouse=true
           if [ "$EVENT" = pull_request ]; then
             # The files this run's commit changes from its base, as the
             # event names them, not the pull request's latest: a re-run, or
@@ -66,7 +67,7 @@ jobs:
               echo "::warning::Could not list the commit's files or the pull request's labels: everything runs."
               files="" labels=""
             fi
-            docs=true integrations=true smolagents=false mcp=false verl=false ch=false
+            docs=true integrations=true smolagents=false mcp=false verl=false agents=false ch=false
             while IFS= read -r file; do
               case $file in
                 "") ;;
@@ -78,6 +79,7 @@ jobs:
                 integrations/smolagents/*) docs=false smolagents=true mcp=true ;;
                 integrations/mcp/*) docs=false mcp=true ;;
                 integrations/verl/*) docs=false verl=true ;;
+                integrations/openai-agents/*) docs=false agents=true ;;
                 integrations/clickhouse/*) docs=false ch=true ;;
                 *.md|docs/*|site/*) ;;
                 *) docs=false integrations=false ;;
@@ -93,13 +95,13 @@ jobs:
               full=false core=false packages='[]' clickhouse=false
             elif [ "$integrations" = true ]; then
               full=false
-              packages=$(jq -cn --argjson s "$smolagents" --argjson m "$mcp" --argjson v "$verl" \
+              packages=$(jq -cn --argjson s "$smolagents" --argjson m "$mcp" --argjson v "$verl" --argjson a "$agents" \
                 '[if $s then "smolagents" else empty end, if $m then "mcp" else empty end,
-                  if $v then "verl" else empty end]')
+                  if $v then "verl" else empty end, if $a then "openai-agents" else empty end]')
               clickhouse=$ch
             fi
             if grep -qx ci/integrations <<< "$labels"; then
-              packages='["smolagents", "mcp", "verl"]' clickhouse=true
+              packages='["smolagents", "mcp", "verl", "openai-agents"]' clickhouse=true
             fi
           fi
           {
@@ -469,8 +471,9 @@ jobs:
 
   # ── Integrations ───────────────────────────────────────────
   # The Python packages in integrations/, smolagents-hyperlight (smolagents),
-  # mcp-server-hyperlight (mcp) and verl-hyperlight (verl, on Linux), with
-  # this commit's hluk and agent image (verl-hyperlight's python image),
+  # mcp-server-hyperlight (mcp), verl-hyperlight (verl, on Linux) and
+  # openai-agents-hyperlight (openai-agents, on Linux), with this commit's
+  # hluk and agent image (verl-hyperlight's python image),
   # their micro-VM tests included, against the oldest release of the library
   # each builds on and the newest. The MCP server runs its guest through
   # this commit's smolagents-hyperlight.
@@ -493,9 +496,11 @@ jobs:
         package: ${{ fromJSON(needs.changes.outputs.packages) }}
         os: [linux, windows]
         deps: [oldest, newest]
-        # verl runs on Linux only
+        # verl and openai-agents run on Linux only
         exclude:
           - package: verl
+            os: windows
+          - package: openai-agents
             os: windows
         include:
           # The oldest library on the oldest Python the package allows
@@ -508,7 +513,8 @@ jobs:
       # pyproject.toml gives them on the oldest leg
       FLOORS: >-
         ${{ matrix.package == 'mcp' && 'mcp smolagents-hyperlight smolagents anyio pydantic rich'
-        || matrix.package == 'verl' && 'filelock' || 'smolagents' }}
+        || matrix.package == 'verl' && 'filelock' || matrix.package == 'openai-agents' && 'openai-agents'
+        || 'smolagents' }}
       # This commit's smolagents-hyperlight, which the MCP server runs its
       # guest through; the oldest leg has the release it allows from PyPI
       REQUIRES: ${{ matrix.package == 'mcp' && matrix.deps == 'newest' && '-e ../smolagents' || '' }}

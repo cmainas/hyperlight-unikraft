@@ -67,6 +67,7 @@ updates:
       - /integrations/mcp
       - /integrations/smolagents
       - /integrations/verl
+      - /integrations/openai-agents
     schedule:
       interval: monthly
     cooldown:

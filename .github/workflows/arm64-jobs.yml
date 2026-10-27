@@ -315,14 +315,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        package: [smolagents, mcp, verl]
+        package: [smolagents, mcp, verl, openai-agents]
         os: ${{ fromJSON(needs.plan.outputs.hosts) }}
         deps: [oldest, newest]
-        # verl runs on Linux only
+        # verl and openai-agents run on Linux only
         exclude:
           - package: verl
             os: macos
           - package: verl
+            os: windows
+          - package: openai-agents
+            os: macos
+          - package: openai-agents
             os: windows
         include:
           - deps: oldest
@@ -333,7 +337,8 @@ jobs:
     env:
       FLOORS: >-
         ${{ matrix.package == 'mcp' && 'mcp smolagents-hyperlight smolagents anyio pydantic rich'
-        || matrix.package == 'verl' && 'filelock' || 'smolagents' }}
+        || matrix.package == 'verl' && 'filelock' || matrix.package == 'openai-agents' && 'openai-agents'
+        || 'smolagents' }}
       REQUIRES: ${{ matrix.package == 'mcp' && matrix.deps == 'newest' && '-e ../smolagents' || '' }}
     defaults:
       run:

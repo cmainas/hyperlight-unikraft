@@ -1,6 +1,7 @@
 # Publish one of the Python packages in integrations/ to PyPI:
 # `smolagents-hyperlight` (integrations/smolagents), `verl-hyperlight`
-# (integrations/verl) or `mcp-server-hyperlight` (integrations/mcp), the last
+# (integrations/verl), `openai-agents-hyperlight` (integrations/openai-agents)
+# or `mcp-server-hyperlight` (integrations/mcp), the last
 # also listed in the MCP Registry, and give the version a GitHub release.
 # Manual; a dry run unless `dry_run` is set to false, and only from main. The
 # version is the one in the package's pyproject.toml, released on its own
@@ -17,6 +18,7 @@ on:
           - smolagents-hyperlight
           - mcp-server-hyperlight
           - verl-hyperlight
+          - openai-agents-hyperlight
         default: smolagents-hyperlight
       dry_run:
         description: "Build and check without publishing"
@@ -39,7 +41,7 @@ env:
   # by a shorter name
   # A choice named here only: an unknown one names no directory, and the build
   # fails rather than publish another package's
-  PACKAGE_DIR: integrations/${{ inputs.package == 'mcp-server-hyperlight' && 'mcp' || inputs.package == 'smolagents-hyperlight' && 'smolagents' || inputs.package == 'verl-hyperlight' && 'verl' || 'unknown' }}
+  PACKAGE_DIR: integrations/${{ inputs.package == 'mcp-server-hyperlight' && 'mcp' || inputs.package == 'smolagents-hyperlight' && 'smolagents' || inputs.package == 'verl-hyperlight' && 'verl' || inputs.package == 'openai-agents-hyperlight' && 'openai-agents' || 'unknown' }}
   # Bumped by hand: Dependabot does not read these
   MCP_PUBLISHER_URL: https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
   MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
@@ -155,6 +157,37 @@ jobs:
           python -m pip install build==1.6.1 twine==7.0.0
           python -m build
           python -m twine check --strict dist/*
+
+      # CI tests the source tree, installed editable: check that the wheel alone installs and imports, outside the
+      # source tree, with only the dependencies it declares
+      - name: Install the wheel
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel"
+          "$RUNNER_TEMP/wheel/bin/python" -m pip install dist/*.whl
+          modules=$(python -c 'import sys, zipfile; print(" ".join(sorted({n.split("/")[0] for n in zipfile.ZipFile(sys.argv[1]).namelist() if n.count("/") == 1 and n.endswith("/__init__.py")})))' dist/*.whl)
+          if [ -z "$modules" ]; then
+            echo "::error::The wheel holds no package"
+            exit 1
+          fi
+          cd "$RUNNER_TEMP"
+          for module in $modules; do
+            "$RUNNER_TEMP/wheel/bin/python" -I -c "import $module"
+          done
+
+      # The SDK provider guide's check: an application run through the SDK's Runner with the client from the
+      # installed wheel, here the sdist's Runner tests with its src/ removed, against their stand-in for hluk
+      - name: Run the Runner tests against the wheel
+        if: ${{ inputs.package == 'openai-agents-hyperlight' }}
+        working-directory: ${{ env.PACKAGE_DIR }}
+        run: |
+          # Bumped by hand, as above
+          "$RUNNER_TEMP/wheel/bin/python" -m pip install pytest==9.1.1 pytest-asyncio==1.4.1
+          mkdir "$RUNNER_TEMP/sdist"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/sdist" --strip-components=1
+          rm -r "$RUNNER_TEMP/sdist/src"
+          cd "$RUNNER_TEMP/sdist"
+          "$RUNNER_TEMP/wheel/bin/python" -I -m pytest -q -p no:cacheprovider tests/test_runner.py
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
