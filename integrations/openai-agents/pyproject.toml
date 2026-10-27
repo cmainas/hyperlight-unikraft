@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openai-agents-hyperlight"
+version = "0.1.0"
+description = "Run the OpenAI Agents SDK's sandbox commands in local Hyperlight micro-VMs"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "The Hyperlight Authors" }]
+requires-python = ">=3.10"
+keywords = ["openai-agents", "hyperlight", "unikraft", "sandbox", "micro-vm", "agents"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Security",
+]
+# The session builds on the SDK's UnixLocal session and its underscored hooks, so each SDK minor release is tested
+# before the range takes it in
+dependencies = ["openai-agents>=0.24.0,<0.25", "pydantic>=2.12,<3", "typing-extensions>=4.12"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.17,<0.18"]
+
+[project.urls]
+Homepage = "https://github.com/hyperlight-dev/hyperlight-unikraft/tree/main/integrations/openai-agents"
+Repository = "https://github.com/hyperlight-dev/hyperlight-unikraft"
+Issues = "https://github.com/hyperlight-dev/hyperlight-unikraft/issues"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE"]
+# Hatchling adds the repository's .gitignore otherwise
+exclude = [".gitignore"]
+
+[tool.ruff]
+line-length = 119
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+known-first-party = ["openai_agents_hyperlight"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"

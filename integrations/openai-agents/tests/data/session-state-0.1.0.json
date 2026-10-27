@@ -1,0 +1,71 @@
+{
+  "exposed_ports": [],
+  "initrd": null,
+  "manifest": {
+    "entries": {
+      "a.txt": {
+        "content": "x",
+        "description": null,
+        "ephemeral": false,
+        "group": null,
+        "is_dir": false,
+        "permissions": {
+          "directory": false,
+          "group": 5,
+          "other": 5,
+          "owner": 7
+        },
+        "type": "file"
+      }
+    },
+    "environment": {
+      "value": {}
+    },
+    "extra_path_grants": [
+      {
+        "description": null,
+        "path": "/srv/data",
+        "read_only": true
+      }
+    ],
+    "groups": [],
+    "remote_mount_command_allowlist": [
+      "ls",
+      "find",
+      "stat",
+      "cat",
+      "less",
+      "head",
+      "tail",
+      "du",
+      "grep",
+      "rg",
+      "wc",
+      "sort",
+      "cut",
+      "cp",
+      "tee",
+      "echo",
+      "mkdir",
+      "rm"
+    ],
+    "root": "/srv/agent-workspace",
+    "users": [],
+    "version": 1
+  },
+  "net_allow": [
+    "pypi.org"
+  ],
+  "runtime": "agent",
+  "scratch_mb": 1024,
+  "session_id": "015fd176-68b1-4310-ab69-c9abc832ca7b",
+  "snapshot": {
+    "id": "015fd176-68b1-4310-ab69-c9abc832ca7b",
+    "type": "noop"
+  },
+  "snapshot_fingerprint": null,
+  "snapshot_fingerprint_version": null,
+  "type": "hyperlight",
+  "workspace_root_owned": false,
+  "workspace_root_ready": false
+}
