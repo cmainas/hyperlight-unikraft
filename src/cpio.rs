@@ -20,6 +20,9 @@
 use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 
+/// The name of the entry that ends a newc archive.
+const TRAILER: &str = "TRAILER!!!";
+
 const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
@@ -156,7 +159,7 @@ impl<W: Write> Writer<W> {
 
     /// Write the trailer and hand the writer back.
     pub fn finish(mut self) -> io::Result<(W, Stats)> {
-        self.header("TRAILER!!!", 0, Attrs::root(0), 1, 0, (0, 0))?;
+        self.header(TRAILER, 0, Attrs::root(0), 1, 0, (0, 0))?;
         self.out.flush()?;
         let stats = Stats {
             // The root and the trailer are bookkeeping, not content.
@@ -257,6 +260,15 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
             name.push_str(normalized);
         }
         let name = name.as_str();
+        // The guest reads a name up to its first NUL, so one inside would
+        // name another file, or the trailer; at the trailer the guest and
+        // the host's driver scan would stop, short of everything after it.
+        if name == TRAILER || name.contains('\0') {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{name:?}: a name the guest would read as another"),
+            ));
+        }
         if FIXED_ETC.iter().any(|(fixed, _)| *fixed == name) {
             continue;
         }
@@ -445,7 +457,7 @@ mod tests {
             let data_start = (name_start + namesize).next_multiple_of(4);
             let data = bytes[data_start..data_start + filesize].to_vec();
             pos = (data_start + filesize).next_multiple_of(4);
-            if name == "TRAILER!!!" {
+            if name == TRAILER {
                 break;
             }
             out.push((name, mode, data));
@@ -679,6 +691,30 @@ mod tests {
             let err = from_tar(tar, io::sink()).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "{err}");
         }
+    }
+
+    #[test]
+    fn refuses_a_file_named_like_the_trailer() {
+        let tar = tar_with(&[("TRAILER!!!", tar::EntryType::Regular, b"", None)]);
+        let err = from_tar(&tar[..], io::sink()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+    }
+
+    #[test]
+    fn refuses_a_name_with_a_nul() {
+        let mut b = tar::Builder::new(Vec::new());
+        b.append_pax_extensions([("path", &b"TRAILER!!!\0x"[..])])
+            .unwrap();
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_path("placeholder").unwrap();
+        h.set_mode(0o644);
+        h.set_size(0);
+        h.set_cksum();
+        b.append(&h, io::empty()).unwrap();
+        let err = from_tar(&b.into_inner().unwrap()[..], io::sink()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert!(err.to_string().contains(r"TRAILER!!!\0x"), "{err}");
     }
 
     #[test]
