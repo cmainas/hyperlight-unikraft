@@ -238,17 +238,51 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
         if FIXED_ETC.iter().any(|(fixed, _)| *fixed == name) {
             continue;
         }
+        let header = entry.header();
+        let kind = header.entry_type();
+        // Extended headers are consumed by the tar reader; anything else
+        // (a sparse file, a GNU volume header) has no place in a rootfs,
+        // and is dropped before its ids can refuse the image.
+        use tar::EntryType as E;
+        if !matches!(
+            kind,
+            E::Directory
+                | E::Regular
+                | E::Continuous
+                | E::Symlink
+                | E::Link
+                | E::Char
+                | E::Block
+                | E::Fifo
+        ) {
+            continue;
+        }
         if name == "etc" {
+            // The fixed files go under it, and through a link they would
+            // land somewhere else, or nowhere.
+            if !kind.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "etc: not a directory, and /etc/hosts and the rest need one",
+                ));
+            }
             has_etc = true;
         }
-        let header = entry.header();
+        let id = |id: u64, what: &str| {
+            u32::try_from(id).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{name}: {what} {id}, over the 32 bits a newc entry holds"),
+                )
+            })
+        };
         let attrs = Attrs {
             mode: header.mode().unwrap_or(0o644),
-            uid: header.uid().unwrap_or(0) as u32,
-            gid: header.gid().unwrap_or(0) as u32,
-            mtime: header.mtime().unwrap_or(0) as u32,
+            uid: id(header.uid().unwrap_or(0), "uid")?,
+            gid: id(header.gid().unwrap_or(0), "gid")?,
+            // A time past 2106 is no reason to refuse an image.
+            mtime: u32::try_from(header.mtime().unwrap_or(0)).unwrap_or(u32::MAX),
         };
-        let kind = header.entry_type();
         let link = entry
             .link_name()
             .ok()
@@ -260,14 +294,19 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
                 let size = header.size().unwrap_or(0);
                 w.file(&name, attrs, size, &mut entry)
             }
-            tar::EntryType::Symlink => w.symlink(&name, link.as_deref().unwrap_or(""), attrs),
+            tar::EntryType::Symlink => match link.as_deref() {
+                Some(target) if !target.is_empty() => w.symlink(&name, target, attrs),
+                // ukcpio cannot make a link to nothing.
+                _ => Ok(()),
+            },
             // A hard link becomes a symlink to its target: the archive is
             // streamed, so the target's data is gone by the time the link
             // arrives, and a read-only rootfs cannot tell the two apart.
-            tar::EntryType::Link => {
-                let target = link.as_deref().and_then(normalize).unwrap_or_default();
-                w.symlink(&name, &format!("/{target}"), attrs)
-            }
+            tar::EntryType::Link => match link.as_deref().and_then(normalize) {
+                Some(target) => w.symlink(&name, &format!("/{target}"), attrs),
+                // A link to nothing, or to the root, has no file to stand for.
+                None => Ok(()),
+            },
             tar::EntryType::Char | tar::EntryType::Block | tar::EntryType::Fifo => {
                 let kind_bits = match kind {
                     tar::EntryType::Char => S_IFCHR,
@@ -280,9 +319,7 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
                 );
                 w.special(&name, kind_bits, attrs, rdev)
             }
-            // Extended headers are consumed by the tar reader; anything
-            // else (a sparse file, a GNU volume header) has no place in a
-            // rootfs.
+            // Dropped above.
             _ => Ok(()),
         };
         result.map_err(|e| context(&format!("writing {name}"), e))?;
@@ -460,6 +497,65 @@ mod tests {
         assert_eq!(normalize("./"), None);
         assert_eq!(normalize("."), None);
         assert_eq!(normalize("a"), Some("a".into()));
+    }
+
+    #[test]
+    fn checks_ids_and_clamps_times() {
+        let entry = |uid: u64, mtime: u64| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_path("app").unwrap();
+            h.set_mode(0o644);
+            h.set_size(0);
+            h.set_uid(uid);
+            h.set_mtime(mtime);
+            h.set_cksum();
+            let mut tar = h.as_bytes().to_vec();
+            tar.resize(tar.len() + 1024, 0);
+            tar
+        };
+        let err = from_tar(&entry(1 << 32, 0)[..], io::sink()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        let mut out = Vec::new();
+        from_tar(&entry(1000, (1 << 32) + 5)[..], &mut out).unwrap();
+        // After the 112 bytes of `.`: the magic, then mtime is field 5.
+        assert_eq!(&out[112 + 6 + 5 * 8..][..8], b"FFFFFFFF");
+    }
+
+    #[test]
+    fn refuses_an_etc_that_is_no_directory() {
+        let tar = tar_with(&[("etc", tar::EntryType::Symlink, b"", Some("private/etc"))]);
+        let err = from_tar(&tar[..], io::sink()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+    }
+
+    #[test]
+    fn drops_unsupported_entries_before_checking_them() {
+        let mut h = tar::Header::new_gnu();
+        // A GNU volume header.
+        h.set_entry_type(tar::EntryType::new(b'V'));
+        h.set_path("volume").unwrap();
+        h.set_size(0);
+        h.set_uid(1 << 32);
+        h.set_cksum();
+        let mut tar = h.as_bytes().to_vec();
+        tar.resize(tar.len() + 1024, 0);
+        let mut out = Vec::new();
+        from_tar(&tar[..], &mut out).unwrap();
+        let names: Vec<String> = read_cpio(&out).into_iter().map(|(n, _, _)| n).collect();
+        assert!(!names.contains(&"volume".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn drops_links_to_nothing() {
+        let tar = tar_with(&[
+            ("bin/ash", tar::EntryType::Link, b"", Some("./")),
+            ("bin/sh", tar::EntryType::Symlink, b"", None),
+        ]);
+        let mut out = Vec::new();
+        from_tar(&tar[..], &mut out).unwrap();
+        let names: Vec<String> = read_cpio(&out).into_iter().map(|(n, _, _)| n).collect();
+        assert!(!names.iter().any(|n| n.starts_with("bin/")), "{names:?}");
     }
 
     #[test]
