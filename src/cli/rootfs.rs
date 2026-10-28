@@ -549,21 +549,16 @@ fn export(cid: &str, output: &Path) -> Result<cpio::Stats, String> {
             return Err(docker_error(e));
         }
     };
-    let mut tar = child.stdout.take().expect("piped");
+    let mut tar = std::io::BufReader::with_capacity(64 << 10, child.stdout.take().expect("piped"));
     // Borrowed, so the pipe stays open until docker's fate is known: a
     // closed pipe kills it with SIGPIPE, which would read as its failure.
-    let result = cpio::from_tar(&mut tar, std::io::BufWriter::new(file));
+    let result = cpio::from_tar(&mut tar, std::io::BufWriter::with_capacity(256 << 10, file));
     // A conversion that fails while docker still streams is the cause; it
     // is killed, and its status after that says nothing.  If docker had
     // already exited, its stream may have been cut short, so both count.
     // Docker's own reason, if any, is on its stderr, which is ours.
     let killed =
         result.is_err() && !matches!(child.try_wait(), Ok(Some(_))) && child.kill().is_ok();
-    if result.is_ok() {
-        // The tar reader stops at the first end block; docker may still be
-        // writing the rest of its stream.
-        let _ = std::io::copy(&mut tar, &mut std::io::sink());
-    }
     drop(tar);
     let status = match child.wait() {
         Err(e) => Err(format!("waiting for docker export: {e}")),

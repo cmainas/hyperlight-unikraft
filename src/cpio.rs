@@ -10,7 +10,7 @@
 //!
 //! ```no_run
 //! # fn main() -> std::io::Result<()> {
-//! let tar = std::fs::File::open("rootfs.tar")?;
+//! let tar = std::io::BufReader::new(std::fs::File::open("rootfs.tar")?);
 //! let out = std::io::BufWriter::new(std::fs::File::create("rootfs.cpio")?);
 //! hyperlight_unikraft::cpio::from_tar(tar, out)?;
 //! # Ok(())
@@ -230,6 +230,12 @@ impl<W: Write> Writer<W> {
 /// 8.8.8.8 and 1.1.1.1; [`SandboxBuilder::resolv_conf`] overrides the
 /// resolver file at boot.
 ///
+/// `tar` is read to its end, past the archive's end blocks, so a process
+/// writing it through a pipe is not cut off; anything but zeros there is
+/// an error.  Buffer it if it is a pipe or a file, since the archive is
+/// read a block at a time.  As in `docker export`, a directory must come
+/// before what it holds: the guest creates no missing parents.
+///
 /// [`SandboxBuilder::resolv_conf`]: crate::SandboxBuilder::resolv_conf
 pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
     let mut archive = tar::Archive::new(tar);
@@ -361,6 +367,34 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
     let (_, stats) = w
         .finish()
         .map_err(|e| context("finishing the archive", e))?;
+    // The reader stops at the first of the two end blocks, or at a
+    // stream that ends between entries, which looks the same to it.  The
+    // second block tells them apart.  Past it there should be only
+    // padding; anything else is a second archive, which would otherwise
+    // be lost without a word.
+    let mut rest = archive.into_inner();
+    let mut buf = [0u8; 8192];
+    let mut zeros = 0;
+    loop {
+        match rest.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) if buf[..n].iter().all(|&b| b == 0) => zeros += n,
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "data after the end of the tar: a second archive?",
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(context("reading tar", e)),
+        }
+    }
+    if zeros < 512 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "reading tar: no end blocks, so cut short?",
+        ));
+    }
     Ok(stats)
 }
 
@@ -614,6 +648,37 @@ mod tests {
         let field = |i: usize| &out[112 + 6 + i * 8..][..8];
         assert_eq!(field(2), format!("{:08X}", 1000680000).as_bytes());
         assert_eq!(field(3), format!("{:08X}", 1000680001).as_bytes());
+    }
+
+    #[test]
+    fn reads_the_tar_to_its_end() {
+        let mut tar = tar_with(&[("app", tar::EntryType::Regular, b"x", None)]);
+        // Record padding after the end blocks, as docker export writes.
+        tar.resize(tar.len() + 8192, 0);
+        let mut rest = &tar[..];
+        from_tar(&mut rest, io::sink()).unwrap();
+        assert!(rest.is_empty(), "{} bytes left unread", rest.len());
+    }
+
+    #[test]
+    fn refuses_a_second_archive() {
+        let one = tar_with(&[("a", tar::EntryType::Regular, b"x", None)]);
+        let two = tar_with(&[("b", tar::EntryType::Regular, b"y", None)]);
+        let err = from_tar(&[one, two].concat()[..], io::sink()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+    }
+
+    #[test]
+    fn refuses_a_tar_cut_short_between_entries() {
+        let whole = tar_with(&[
+            ("a", tar::EntryType::Regular, b"x", None),
+            ("b", tar::EntryType::Regular, b"y", None),
+        ]);
+        // After `a`'s header and data block, before `b`.
+        for tar in [&whole[..1024], &[][..]] {
+            let err = from_tar(tar, io::sink()).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "{err}");
+        }
     }
 
     #[test]
