@@ -284,6 +284,7 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
             }
             has_etc = true;
         }
+        let header = entry.header();
         let id = |id: u64, what: &str| {
             u32::try_from(id).map_err(|_| {
                 io::Error::new(
@@ -306,7 +307,9 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
         let result = match kind {
             tar::EntryType::Directory => w.dir(name, attrs),
             tar::EntryType::Regular | tar::EntryType::Continuous => {
-                let size = header.size().unwrap_or(0);
+                // The entry's, not the header's: past 8 GiB the size is in
+                // a PAX record and the header says 0.
+                let size = entry.size();
                 w.file(name, attrs, size, &mut entry)
             }
             // ukcpio cannot make a link to nothing.
@@ -562,6 +565,55 @@ mod tests {
         from_tar(&tar[..], &mut out).unwrap();
         let names: Vec<String> = read_cpio(&out).into_iter().map(|(n, _, _)| n).collect();
         assert!(!names.contains(&"volume".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn takes_sizes_from_pax_records() {
+        // What Go's archive/tar, and so docker export, writes for a file
+        // too large for the header: size 0 there, the real one in PAX.
+        let mut b = tar::Builder::new(Vec::new());
+        b.append_pax_extensions([("size", &b"5"[..])]).unwrap();
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_path("app").unwrap();
+        h.set_mode(0o644);
+        h.set_size(0);
+        h.set_cksum();
+        // As given, header and data, with no size of its own.
+        b.append(&h, &b"hello"[..]).unwrap();
+        let tar = b.into_inner().unwrap();
+        let mut out = Vec::new();
+        from_tar(&tar[..], &mut out).unwrap();
+        let app = read_cpio(&out)
+            .into_iter()
+            .find(|(n, _, _)| n == "app")
+            .unwrap();
+        assert_eq!(app.2, b"hello");
+    }
+
+    #[test]
+    fn takes_ids_from_pax_records() {
+        // A uid past the header's 7 octal digits, as docker export writes
+        // it for an OpenShift-style random uid.  The tar reader copies PAX
+        // ids into the header, unlike the size; this keeps it so.
+        let mut b = tar::Builder::new(Vec::new());
+        b.append_pax_extensions([("uid", &b"1000680000"[..]), ("gid", &b"1000680001"[..])])
+            .unwrap();
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_path("app").unwrap();
+        h.set_mode(0o644);
+        h.set_size(0);
+        h.set_cksum();
+        b.append(&h, io::empty()).unwrap();
+        let tar = b.into_inner().unwrap();
+        let mut out = Vec::new();
+        from_tar(&tar[..], &mut out).unwrap();
+        // After the 112 bytes of `.`: the magic, then uid and gid are
+        // fields 2 and 3.
+        let field = |i: usize| &out[112 + 6 + i * 8..][..8];
+        assert_eq!(field(2), format!("{:08X}", 1000680000).as_bytes());
+        assert_eq!(field(3), format!("{:08X}", 1000680001).as_bytes());
     }
 
     #[test]

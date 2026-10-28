@@ -55,8 +55,9 @@ cap-fs-ext = "4"
 # through hyperlight-host.
 getrandom = "0.4"
 rustix = { version = "1", features = ["net", "event"] }
-# Nothing here unpacks archives onto disk, so no xattr support.
-tar = { version = "0.4", default-features = false, optional = true }
+# Nothing here unpacks archives onto disk, so no xattr support.  0.4.46
+# is the release the PAX size and id handling was checked against.
+tar = { version = "0.4.46", default-features = false, optional = true }
 
 # Optional — CLI only.
 clap = { version = "4", features = ["derive"], optional = true }
