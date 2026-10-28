@@ -5,7 +5,7 @@ mod common;
 use std::path::PathBuf;
 
 use common::{guest_log, hluk_with_stdin, require_rootfs, temp_dir};
-use hyperlight_unikraft::{Exec, SandboxBuilder};
+use hyperlight_unikraft::{Exec, SandboxBuilder, load_snapshot, snapshot_scratch_mb};
 
 #[test]
 fn bash_inline_code() {
@@ -48,6 +48,11 @@ fn bash_snapshot_round_trip() {
         .boot()
         .unwrap();
     sandbox.snapshot_to(&snap_dir).unwrap();
+    assert_eq!(
+        snapshot_scratch_mb(&load_snapshot(&snap_dir).unwrap()),
+        Some(256),
+        "the snapshot records the guest's memory, through the save and the load"
+    );
 
     let mut sandbox = SandboxBuilder::from_snapshot_dir(&snap_dir)
         .unwrap()
@@ -55,6 +60,11 @@ fn bash_snapshot_round_trip() {
         .unwrap();
     sandbox.run("echo 'restored-bash-ok'").unwrap();
     let output = sandbox.drain_output();
+    assert_eq!(
+        snapshot_scratch_mb(&sandbox.snapshot().unwrap()),
+        Some(256),
+        "a guest restored from the snapshot knows its size from it"
+    );
     assert!(
         output.contains("restored-bash-ok"),
         "expected restored guest to print 'restored-bash-ok', got: {output:?}",

@@ -649,6 +649,36 @@ pub fn scratch_mb_from(n: u64) -> Option<usize> {
         .filter(|mb| *mb > 0 && mb.checked_mul(MIB).is_some())
 }
 
+/// The namespace of what `hluk` records in a snapshot's metadata.
+const SNAPSHOT_META: &str = "hluk";
+
+/// The guest memory a snapshot was taken with, in MiB, as
+/// [`AppSandbox::snapshot`] records it; `None` for a snapshot a release
+/// before that took, or one of a guest restored from such a snapshot,
+/// whose size `hluk` does not know.
+pub fn snapshot_scratch_mb(snapshot: &Snapshot) -> Option<usize> {
+    let meta = snapshot
+        .metadata::<serde_json::Value>(SNAPSHOT_META)
+        .ok()??;
+    scratch_mb_from(meta.get("scratch_mb")?.as_u64()?)
+}
+
+/// Record in `snapshot` the guest memory it restores with, `scratch_mb`:
+/// the snapshot's layout holds it but does not show it, and a restore
+/// wants to tell whether the memory limit it runs under holds the guest.
+/// A snapshot taken to restore at another size records that size.  `None`
+/// (a guest restored from a snapshot that recorded nothing) records
+/// nothing rather than a guess.
+fn record_scratch_mb(snapshot: Arc<Snapshot>, scratch_mb: Option<usize>) -> Result<Arc<Snapshot>> {
+    let Some(scratch_mb) = scratch_mb else {
+        return Ok(snapshot);
+    };
+    Ok(snapshot.with_metadata(
+        SNAPSHOT_META,
+        &serde_json::json!({ "scratch_mb": scratch_mb }),
+    )?)
+}
+
 /// Write a snapshot from [`AppSandbox::snapshot`] to `dir` as an OCI image
 /// layout, named by this release and its [`SNAPSHOT_KEY`].  Another
 /// process, or a later run of this one, reads it back with
@@ -1191,7 +1221,10 @@ impl Default for Console {
 /// [`drain_output`](Self::drain_output)).
 pub(crate) struct GuestConfig {
     cmdline: String,
-    scratch_size: usize,
+    /// The guest's memory in bytes; `None` for a guest restored from a
+    /// snapshot that did not record its size, which the snapshot's own
+    /// layout sizes.
+    scratch_size: Option<usize>,
     initrd_base: u64,
     initrd_size: u64,
     /// Host filesystem mounts.
@@ -1233,7 +1266,7 @@ impl GuestConfig {
     #[allow(clippy::too_many_arguments)]
     fn new(
         cmdline: String,
-        scratch_size: usize,
+        scratch_size: Option<usize>,
         initrd_base: u64,
         initrd_size: u64,
         mounts: Vec<Mount>,
@@ -1290,7 +1323,7 @@ impl GuestConfig {
 
     /// How much scratch memory to give the paging frame allocator (75%).
     fn paging_budget(&self) -> u64 {
-        (self.scratch_size as u64) * 3 / 4
+        (self.scratch_size.unwrap_or(DEFAULT_SCRATCH_MB * MIB) as u64) * 3 / 4
     }
 
     /// Top of the exception stack in guest virtual address space.
@@ -2167,7 +2200,7 @@ fn assemble_sandbox(
 
     let config = GuestConfig::new(
         cmdline,
-        scratch_size,
+        Some(scratch_size),
         initrd_base,
         initrd_size,
         mounts,
@@ -3081,7 +3114,8 @@ impl AppSandbox {
         if let Some(Yield::Exited { status }) = self.exited {
             return Err(Error::GuestExited { status });
         }
-        Ok(self.sandbox.snapshot()?)
+        let snapshot = self.sandbox.snapshot()?;
+        record_scratch_mb(snapshot, self.config.scratch_size.map(|size| size / MIB))
     }
 
     /// [`snapshot`](Self::snapshot), then [`save_snapshot`] it to `dir`.
@@ -3096,10 +3130,17 @@ impl AppSandbox {
     /// guest right for this host with a `resume` entry, as
     /// [`SandboxBuilder::boot`] does, with this sandbox's mounts.
     pub fn restore(&mut self, snapshot: Arc<Snapshot>) -> Result<()> {
+        let recorded = snapshot_scratch_mb(&snapshot);
         let sandbox = &mut self.sandbox;
         self.config
             .profile
             .time("restore: hyperlight", || sandbox.restore(snapshot))?;
+        // A restore in place keeps the sandbox's memory layout, so its
+        // size stands; a snapshot that recorded one makes it known where
+        // it was not.
+        if let Some(mb) = recorded {
+            self.config.scratch_size = Some(mb * MIB);
+        }
         // The host sockets belong to the guest state just discarded; the
         // restored guest re-creates the ones it holds on its resume entry.
         if let Some(net) = &self.config.net {
@@ -3204,9 +3245,11 @@ fn restore_snapshot(
     guest_log_level: Option<tracing::level_filters::LevelFilter>,
     console: Console,
 ) -> Result<(Sandbox, GuestConfig)> {
+    // The snapshot's own layout sizes the guest; the config carries the
+    // size the snapshot recorded, if it did.
     let config = GuestConfig::new(
         String::new(),
-        DEFAULT_SCRATCH_MB * 1024 * 1024,
+        snapshot_scratch_mb(&snapshot).map(|mb| mb * MIB),
         0,
         0,
         mounts,
@@ -3347,7 +3390,7 @@ mod tests {
     /// A name given twice reaches the guest once, with the last value.
     #[test]
     fn env_names_given_twice_keep_the_last() {
-        let config = GuestConfig::new(String::new(), 0, 0, 0, Vec::new(), None, None);
+        let config = GuestConfig::new(String::new(), None, 0, 0, Vec::new(), None, None);
         config.set_env_vars(&[("A", "1"), ("B", "2"), ("A", "3")]);
         assert_eq!(*config.env_str.lock().unwrap(), "B=2\0A=3\0");
     }
@@ -3357,7 +3400,7 @@ mod tests {
     /// leaves it off.
     #[test]
     fn listen_ports_alone_enable_networking() {
-        let config = |ports| GuestConfig::new(String::new(), 0, 0, 0, Vec::new(), None, ports);
+        let config = |ports| GuestConfig::new(String::new(), None, 0, 0, Vec::new(), None, ports);
         assert!(config(None).net.is_none());
         assert!(config(Some(ListenPorts::from_ports([8080]))).net.is_some());
     }
@@ -3426,7 +3469,7 @@ mod tests {
     fn paging_budget_is_75_percent() {
         let cfg = GuestConfig::new(
             String::new(),
-            256 * 1024 * 1024,
+            Some(256 * 1024 * 1024),
             0,
             0,
             Vec::new(),

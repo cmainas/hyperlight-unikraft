@@ -738,6 +738,16 @@ pub struct GuestMemory {
 }
 
 impl GuestMemory {
+    /// A guest of `mb` MiB that is not up for sizing (a snapshot's), under
+    /// `limit`, for the hints.
+    pub fn given(mb: usize, limit: Option<usize>) -> Self {
+        GuestMemory {
+            mb,
+            how: SizedBy::Setting,
+            limit,
+        }
+    }
+
     /// Whether the limit holds the guest: there is none, or the guest and
     /// `hluk`'s own share are within it.
     pub fn fits(&self) -> bool {
@@ -1600,6 +1610,26 @@ mod tests {
             fits(flag(32), Some(100)),
             "a small guest fits a limit too small to size one by"
         );
+        assert!(!GuestMemory::given(1536, Some(512)).fits());
+        assert!(GuestMemory::given(1536, None).fits());
+        assert!(
+            !GuestMemory::given(usize::MAX, Some(512)).fits(),
+            "an absurd size does not wrap into a fit"
+        );
+    }
+
+    #[test]
+    fn the_limit_holds_a_save_or_the_note_says_not() {
+        let holds = |mb, limit| GuestMemory::given(mb, limit).holds_a_save();
+        assert!(holds(1472, None));
+        assert!(
+            holds(200, Some(512)),
+            "twice the guest and hluk's share fit"
+        );
+        assert!(holds(224, Some(512)));
+        assert!(!holds(225, Some(512)));
+        assert!(!holds(448, Some(512)), "what max gives never leaves room");
+        assert!(!holds(usize::MAX / 2 + 1, Some(512)));
     }
 
     #[test]

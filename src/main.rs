@@ -683,12 +683,19 @@ fn cmd_snapshot_run(args: SnapshotRunArgs) -> CliResult<()> {
         parse_net_policy(args.net, &args.net_allow, &args.net_block, &args.ports)?;
 
     let t = Instant::now();
-    let builder = SandboxBuilder::from_snapshot_dir(&args.snapshot)?;
+    let snapshot = load_snapshot(&args.snapshot)?;
     info!(
         path = %args.snapshot.display(),
         elapsed_ms = elapsed_ms(t),
         "snapshot loaded",
     );
+    // The guest is the size the snapshot was taken with: say when the
+    // memory limit cannot hold it.
+    if let Some(mb) = hyperlight_unikraft::snapshot_scratch_mb(&snapshot) {
+        let limit = hyperlight_unikraft::cgroup_memory_limit_mb();
+        cli::container_hint(&cli::GuestMemory::given(mb, limit));
+    }
+    let builder = SandboxBuilder::from_snapshot(snapshot);
 
     let envs = parse_envs(&args.envs)?;
 
