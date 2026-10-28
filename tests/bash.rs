@@ -392,3 +392,17 @@ fn bash_empty_strings_reach_programs() {
         .unwrap();
     assert_eq!(sandbox.drain_output(), "[]\npiped\n");
 }
+
+/// Commands run back to back, with no pause for the guest to idle in, give
+/// their memory back as they end: a loop of thousands fits in a small guest.
+#[test]
+fn bash_commands_back_to_back_give_their_memory_back() {
+    let mut sandbox = SandboxBuilder::from_initrd(require_rootfs("bash"))
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run("for i in $(seq 3000); do /bin/true || echo \"failed at $i\"; done; echo loop-done")
+        .unwrap();
+    assert_eq!(sandbox.drain_output(), "loop-done\n");
+}
