@@ -113,10 +113,11 @@ struct SaveArgs {
     #[arg(long, value_name = "PATH")]
     kernel: Option<PathBuf>,
 
-    /// Guest memory in MiB. Default: the size the rootfs's runtime image is
-    /// tested with.
-    #[arg(long, value_name = "MIB")]
-    scratch_mb: Option<usize>,
+    /// Guest memory in MiB, or `max`: what the memory limit hluk runs under
+    /// (a container's) leaves once hluk has its own share. Default: the size
+    /// the rootfs's runtime image is tested with.
+    #[arg(long, value_name = "MIB|max")]
+    scratch_mb: Option<cli::ScratchArg>,
 
     /// Directory to save the snapshot (OCI Image Layout).
     #[arg(short, long)]
@@ -245,7 +246,8 @@ struct BenchColdArgs {
     script: PathBuf,
 
     /// Guest memory in MiB. Default: the size the rootfs's runtime image is
-    /// tested with.
+    /// tested with; a benchmark wants a fixed size, so a memory limit does
+    /// not cap it.
     #[arg(long, value_name = "MIB")]
     scratch_mb: Option<usize>,
 
@@ -610,25 +612,32 @@ fn cmd_snapshot_save(args: SaveArgs) -> CliResult<()> {
     let mounts = parse_mounts(&args.mounts)?;
     let (policy, listen) =
         parse_net_policy(args.net, &args.net_allow, &args.net_block, &args.ports)?;
-    let mut builder = match &args.runtime {
+    // The guest's memory, as `hluk run` sizes it: the size the runtime
+    // image is tested with, by name for --runtime, by the rootfs's marker
+    // or driver otherwise, or what the memory limit leaves for `max`.
+    let runtime_initrd = match &args.runtime {
         Some(runtime) => {
             cli::check_runtime_name(runtime)?;
             let (path, _) =
                 cli::rootfs::ensure_initrd(&cli::registry::runtime_image(runtime), false)?;
-            let mut b = SandboxBuilder::from_initrd(path);
-            if let Some(mb) = cli::registry::runtime_name(runtime)
-                .and_then(hyperlight_unikraft::runtime_scratch_mb)
-            {
-                b = b.scratch_mb(mb);
-            }
-            b
+            Some(path)
         }
+        None => None,
+    };
+    let initrd = runtime_initrd.as_deref().or(args.initrd.as_deref());
+    let limit = hyperlight_unikraft::cgroup_memory_limit_mb();
+    let sizing = cli::guest_memory(
+        args.scratch_mb.map(cli::Asked::Flag),
+        || initrd.map(|initrd| cli::tested_scratch_mb(args.runtime.as_deref(), initrd)),
+        limit,
+    )?;
+    cli::container_hint(&sizing);
+    cli::save_memory_note(&sizing);
+    let builder = match runtime_initrd {
+        Some(path) => SandboxBuilder::from_initrd(path),
         None => base_builder(args.kernel, args.initrd)?,
-    }
-    .mounts(mounts);
-    if let Some(mb) = args.scratch_mb {
-        builder = builder.scratch_mb(mb);
-    }
+    };
+    let mut builder = builder.mounts(mounts).scratch_mb(sizing.mb);
     if let Some(entry) = args.entry {
         builder = builder.entry(entry);
     }

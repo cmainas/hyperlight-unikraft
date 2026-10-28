@@ -12,11 +12,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use hyperlight_unikraft::{
-    ListenPorts, Mount, NetworkPolicy, default_scratch_mb, runtime_scratch_mb,
-};
+use hyperlight_unikraft::{ListenPorts, Mount, NetworkPolicy};
 
-use super::registry::Reference;
+use super::ScratchArg;
 
 use crate::{PortSpec, parse_mounts, parse_net_policy};
 
@@ -83,9 +81,10 @@ pub struct Run {
     /// The guest's entry point (`hluk run --entry`): a plain program as PID
     /// 1 when the rootfs has no driver.
     pub entry: Option<String>,
-    /// Guest memory in MiB; without it, the size the runtime image is
-    /// tested with (see [`Manifest::scratch_mb`]).
-    pub scratch_mb: Option<usize>,
+    /// Guest memory in MiB, or `"max"`, what the container's memory limit
+    /// leaves; without it, the size the runtime image is tested with (see
+    /// [`Manifest::tested_scratch_mb`]).
+    pub scratch_mb: Option<ScratchArg>,
     /// `HOST:GUEST[:ro]` entries; a relative host path is relative to the
     /// manifest.
     #[serde(default)]
@@ -262,22 +261,13 @@ impl Manifest {
         }
     }
 
-    /// The guest's memory: the manifest's `scratch_mb`; else the size the
-    /// runtime image is tested with, by the image's name
-    /// (`…/agent:initrd-v0.14.1` is `agent`) when the rootfs is a published
-    /// image, else by the runtime `rootfs` names in `etc/hluk-runtime`,
-    /// else by the driver found in it.
-    pub fn scratch_mb(&self, rootfs: &Path) -> usize {
-        if let Some(mb) = self.run.scratch_mb {
-            return mb;
-        }
-        let by_name = self
-            .rootfs
-            .image
-            .as_deref()
-            .and_then(|image| Reference::parse(image).ok())
-            .and_then(|r| r.repository.rsplit('/').next().and_then(runtime_scratch_mb));
-        by_name.unwrap_or_else(|| default_scratch_mb(rootfs))
+    /// The size the runtime image is tested with, whatever the manifest's
+    /// `scratch_mb` says: by the image's name (`…/agent:initrd-v0.14.1` is
+    /// `agent`) when the rootfs is a published image, else by the runtime
+    /// `rootfs` names in `etc/hluk-runtime`, else by the driver found in
+    /// it.
+    pub fn tested_scratch_mb(&self, rootfs: &Path) -> usize {
+        super::tested_scratch_mb(self.rootfs.image.as_deref(), rootfs)
     }
 
     /// Where `hluk build` writes this project's Dockerfile rootfs.
@@ -411,21 +401,31 @@ mod tests {
     }
 
     #[test]
-    fn memory_is_explicit_else_the_images_tested_size_else_the_libraries() {
+    fn memory_is_the_manifests_and_the_tested_size_is_the_images() {
         let m = with_dir(MINIMAL);
         // The python image, by name; the rootfs file need not exist for that.
-        assert_eq!(m.scratch_mb(Path::new("/nonexistent")), 256);
+        assert_eq!(m.tested_scratch_mb(Path::new("/nonexistent")), 256);
         let agent = with_dir(&MINIMAL.replace("python:initrd", "agent:initrd"));
-        assert_eq!(agent.scratch_mb(Path::new("/nonexistent")), 1536);
+        assert_eq!(agent.tested_scratch_mb(Path::new("/nonexistent")), 1536);
         let explicit = with_dir(&MINIMAL.replace(
             "script = \"main.py\"",
             "script = \"main.py\"\nscratch_mb = 64",
         ));
-        assert_eq!(explicit.scratch_mb(Path::new("/nonexistent")), 64);
+        assert_eq!(explicit.run.scratch_mb, Some(ScratchArg::Mib(64)));
+        assert_eq!(
+            explicit.tested_scratch_mb(Path::new("/nonexistent")),
+            256,
+            "the tested size does not read the manifest's"
+        );
+        let max = with_dir(&MINIMAL.replace(
+            "script = \"main.py\"",
+            "script = \"main.py\"\nscratch_mb = \"max\"",
+        ));
+        assert_eq!(max.run.scratch_mb, Some(ScratchArg::Max));
         // An image whose name is no runtime falls back to the library's default.
         let other = with_dir(&MINIMAL.replace("python:initrd", "stats-api:initrd"));
         assert_eq!(
-            other.scratch_mb(Path::new("/nonexistent")),
+            other.tested_scratch_mb(Path::new("/nonexistent")),
             hyperlight_unikraft::DEFAULT_SCRATCH_MB
         );
     }
