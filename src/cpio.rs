@@ -17,6 +17,7 @@
 //! # }
 //! ```
 
+use std::fmt::Write as _;
 use std::io::{self, Read, Write};
 
 const S_IFREG: u32 = 0o100000;
@@ -84,6 +85,9 @@ pub(crate) struct Writer<W: Write> {
     ino: u32,
     bytes: u64,
     entries: u64,
+    /// One header at a time, reused: an allocation per entry adds up over
+    /// a rootfs of tens of thousands.
+    header: String,
 }
 
 impl<W: Write> Writer<W> {
@@ -94,6 +98,7 @@ impl<W: Write> Writer<W> {
             ino: 0,
             bytes: 0,
             entries: 0,
+            header: String::new(),
         };
         w.header(".", S_IFDIR | 0o755, Attrs::root(0), 2, 0, (0, 0))?;
         Ok(w)
@@ -197,10 +202,11 @@ impl<W: Write> Writer<W> {
             namesize,
             0,
         ];
-        let mut header = String::with_capacity(110 + name.len() + 4);
+        let header = &mut self.header;
+        header.clear();
         header.push_str("070701");
         for field in fields {
-            header.push_str(&format!("{field:08X}"));
+            let _ = write!(header, "{field:08X}");
         }
         header.push_str(name);
         header.push('\0');
@@ -229,12 +235,22 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
     let mut archive = tar::Archive::new(tar);
     let mut w = Writer::new(out).map_err(|e| context("writing .", e))?;
     let mut has_etc = false;
+    // Reused, like the writer's header buffer.
+    let mut name = String::new();
+    let mut link = String::new();
+    let mut absolute = String::new();
     for entry in archive.entries().map_err(|e| context("reading tar", e))? {
         let mut entry = entry.map_err(|e| context("reading tar", e))?;
-        let path = entry.path().map_err(|e| context("reading tar", e))?;
-        let Some(name) = normalize(&path.to_string_lossy()) else {
-            continue;
-        };
+        {
+            let path = entry.path().map_err(|e| context("reading tar", e))?;
+            let path = path.to_string_lossy();
+            let Some(normalized) = normalize(&path) else {
+                continue;
+            };
+            name.clear();
+            name.push_str(normalized);
+        }
+        let name = name.as_str();
         if FIXED_ETC.iter().any(|(fixed, _)| *fixed == name) {
             continue;
         }
@@ -283,27 +299,29 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
             // A time past 2106 is no reason to refuse an image.
             mtime: u32::try_from(header.mtime().unwrap_or(0)).unwrap_or(u32::MAX),
         };
-        let link = entry
-            .link_name()
-            .ok()
-            .flatten()
-            .map(|p| p.to_string_lossy().into_owned());
+        link.clear();
+        if let Some(target) = entry.link_name().ok().flatten() {
+            link.push_str(&target.to_string_lossy());
+        }
         let result = match kind {
-            tar::EntryType::Directory => w.dir(&name, attrs),
+            tar::EntryType::Directory => w.dir(name, attrs),
             tar::EntryType::Regular | tar::EntryType::Continuous => {
                 let size = header.size().unwrap_or(0);
-                w.file(&name, attrs, size, &mut entry)
+                w.file(name, attrs, size, &mut entry)
             }
-            tar::EntryType::Symlink => match link.as_deref() {
-                Some(target) if !target.is_empty() => w.symlink(&name, target, attrs),
-                // ukcpio cannot make a link to nothing.
-                _ => Ok(()),
-            },
+            // ukcpio cannot make a link to nothing.
+            tar::EntryType::Symlink if link.is_empty() => Ok(()),
+            tar::EntryType::Symlink => w.symlink(name, &link, attrs),
             // A hard link becomes a symlink to its target: the archive is
             // streamed, so the target's data is gone by the time the link
             // arrives, and a read-only rootfs cannot tell the two apart.
-            tar::EntryType::Link => match link.as_deref().and_then(normalize) {
-                Some(target) => w.symlink(&name, &format!("/{target}"), attrs),
+            tar::EntryType::Link => match normalize(&link) {
+                Some(target) => {
+                    absolute.clear();
+                    absolute.push('/');
+                    absolute.push_str(target);
+                    w.symlink(name, &absolute, attrs)
+                }
                 // A link to nothing, or to the root, has no file to stand for.
                 None => Ok(()),
             },
@@ -317,7 +335,7 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
                     header.device_major().ok().flatten().unwrap_or(0),
                     header.device_minor().ok().flatten().unwrap_or(0),
                 );
-                w.special(&name, kind_bits, attrs, rdev)
+                w.special(name, kind_bits, attrs, rdev)
             }
             // Dropped above.
             _ => Ok(()),
@@ -351,7 +369,7 @@ fn context(what: &str, e: io::Error) -> io::Error {
 
 /// A tar path as a cpio name: no leading `./` or `/`, no trailing `/`;
 /// `None` for the root itself.
-fn normalize(path: &str) -> Option<String> {
+fn normalize(path: &str) -> Option<&str> {
     let mut name = path;
     loop {
         if let Some(rest) = name.strip_prefix("./") {
@@ -366,7 +384,7 @@ fn normalize(path: &str) -> Option<String> {
     if name.is_empty() || name == "." {
         None
     } else {
-        Some(name.to_string())
+        Some(name)
     }
 }
 
@@ -492,11 +510,11 @@ mod tests {
 
     #[test]
     fn normalizes_names() {
-        assert_eq!(normalize("./a/b/"), Some("a/b".into()));
-        assert_eq!(normalize("/a"), Some("a".into()));
+        assert_eq!(normalize("./a/b/"), Some("a/b"));
+        assert_eq!(normalize("/a"), Some("a"));
         assert_eq!(normalize("./"), None);
         assert_eq!(normalize("."), None);
-        assert_eq!(normalize("a"), Some("a".into()));
+        assert_eq!(normalize("a"), Some("a"));
     }
 
     #[test]
