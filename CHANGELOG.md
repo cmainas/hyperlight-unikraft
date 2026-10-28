@@ -6,9 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
-- The library exports `cpio::from_tar`, the pure-Rust Docker-tar-to-newc
-  converter used by `hluk build`, so embedders can create initrd images without
-  a host `cpio` executable.
+- The library exports `cpio::from_tar` behind the default `cpio` feature: the pure-Rust tar-to-newc converter `hluk build` uses, so embedders can build an initrd without a host `cpio`. It writes its own `etc/hosts`, `etc/nsswitch.conf` and `etc/resolv.conf` over the tar's.
 - `openai-agents-hyperlight` (`integrations/openai-agents/`): a sandbox provider for the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python), built to the SDK's provider guide, that runs each shell command of a sandbox agent in a fresh micro-VM through `hluk run`, from a warm snapshot (`SandboxRunConfig(client=HyperlightSandboxClient())`). The workspace is a host directory shared into each guest at its own path, so the SDK's file operations, snapshots and resume work as for its local backend; the guest sees nothing else of the host but directory grants, and has no network unless hosts are allowed (`net_allow`). PTY sessions, exposed ports, sandbox users, manifest mounts and Git repository entries are refused. Linux only, with `hluk` v0.19.0 or later and `openai-agents` 0.24. Published to PyPI on its own version by `pypi-publish.yml`; CI tests it on Linux with each commit's `hluk` and `agent` image, in micro-VMs and through the SDK's `Runner`.
 
 ### Fixed
