@@ -35,6 +35,7 @@ pub use hyperlight_host::{HostFunctions, sandbox::snapshot::Snapshot};
 
 use tracing::{debug, info};
 
+pub mod cpio;
 mod errno;
 mod hostfs;
 mod hostnet;

@@ -24,7 +24,6 @@ cli = [
     "dep:toml",
     "dep:ureq",
     "dep:flate2",
-    "dep:tar",
     "dep:sha2",
 ]
 # Also target the Microsoft Hypervisor (Azure Linux / Mariner) on Linux, in
@@ -51,6 +50,7 @@ cap-fs-ext = "4"
 # through hyperlight-host.
 getrandom = "0.4"
 rustix = { version = "1", features = ["net", "event"] }
+tar = "0.4"
 
 # Optional — CLI only.
 clap = { version = "4", features = ["derive"], optional = true }
@@ -64,7 +64,6 @@ serde = { version = "1", features = ["derive"], optional = true }
 toml = { version = "1", optional = true }
 ureq = { version = "3", default-features = false, features = ["rustls"], optional = true }
 flate2 = { version = "1", optional = true }
-tar = { version = "0.4", optional = true }
 sha2 = { version = "0.11", optional = true }
 
 # hyperlight-host's hypervisor backend is chosen at compile time by feature.

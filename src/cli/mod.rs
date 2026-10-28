@@ -9,7 +9,6 @@
 //! ([`manifest`]) is the run's flags written down; every one of them can
 //! still be given on the command line.
 
-pub mod cpio;
 pub mod github;
 pub mod manifest;
 pub mod prompt;

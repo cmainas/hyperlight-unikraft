@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use super::cpio;
 use super::manifest::Manifest;
 use super::registry::{Client, Reference, extract_initrd};
+use hyperlight_unikraft::cpio;
 
 /// Where pulled rootfs images live: `$HLUK_CACHE_DIR`, else the platform's
 /// cache directory (`$XDG_CACHE_HOME/hluk` or `~/.cache/hluk` on Unix,
