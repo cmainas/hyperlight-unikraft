@@ -544,7 +544,7 @@ fn export(cid: &str, output: &Path) -> Result<cpio::Stats, String> {
     let stats = {
         let file =
             fs::File::create(&part).map_err(|e| format!("cannot write {}: {e}", part.display()))?;
-        let result = cpio::from_tar(tar, std::io::BufWriter::new(file));
+        let result = cpio::from_tar(tar, std::io::BufWriter::new(file)).map_err(|e| e.to_string());
         let status = child.wait().map_err(|e| e.to_string())?;
         if !status.success() {
             let _ = fs::remove_file(&part);

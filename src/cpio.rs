@@ -5,8 +5,17 @@
 //! the kernel takes as its initrd, the way `find . | cpio -o -H newc` lays
 //! it out: a `.` entry first, then every path bare of a leading `./`, so
 //! the driver detection and the guest see the same names as in the
-//! published images.  Pure Rust, so `hluk build` needs Docker and nothing
-//! else on the host.
+//! published images.  Pure Rust, so building an initrd needs no host
+//! `cpio`; `hluk build` uses it on the output of `docker export`.
+//!
+//! ```no_run
+//! # fn main() -> std::io::Result<()> {
+//! let tar = std::fs::File::open("rootfs.tar")?;
+//! let out = std::io::BufWriter::new(std::fs::File::create("rootfs.cpio")?);
+//! hyperlight_unikraft::cpio::from_tar(tar, out)?;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::io::{self, Read, Write};
 
@@ -38,14 +47,19 @@ const FIXED_ETC: &[(&str, &str)] = &[
 
 /// What a conversion produced.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Stats {
+    /// Entries written, the fixed `/etc` files among them; the root and
+    /// the trailer are not counted.
     pub entries: u64,
+    /// File and symlink contents written.  Headers and padding make the
+    /// archive larger than this.
     pub bytes: u64,
 }
 
 /// The ownership, permissions and time an entry carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Attrs {
+pub(crate) struct Attrs {
     pub mode: u32,
     pub uid: u32,
     pub gid: u32,
@@ -65,7 +79,7 @@ impl Attrs {
 }
 
 /// A newc CPIO writer.
-pub struct Writer<W: Write> {
+pub(crate) struct Writer<W: Write> {
     out: W,
     ino: u32,
     bytes: u64,
@@ -108,7 +122,7 @@ impl<W: Write> Writer<W> {
         if copied != size {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!("{name}: {copied} of {size} bytes"),
+                format!("{copied} of {size} bytes"),
             ));
         }
         self.bytes += copied;
@@ -161,7 +175,7 @@ impl<W: Write> Writer<W> {
         let filesize = u32::try_from(filesize).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("{name}: {filesize} bytes, over the 4 GiB a newc entry can hold"),
+                format!("{filesize} bytes, over the 4 GiB a newc entry can hold"),
             )
         })?;
         let namesize = name.len() as u32 + 1;
@@ -201,16 +215,24 @@ impl<W: Write> Writer<W> {
     }
 }
 
-/// Convert a tar stream to a CPIO archive, fixing the `/etc` files
-/// `docker export` empties (see [`FIXED_ETC`]).
-pub fn from_tar(tar: impl Read, out: impl Write) -> Result<Stats, String> {
+/// Convert a tar stream to a CPIO archive.
+///
+/// The archive always carries its own `etc/hosts`, `etc/nsswitch.conf`
+/// and `etc/resolv.conf`, whatever the tar holds at those paths:
+/// `docker export` empties them, and an initrd without them cannot
+/// resolve names.  The hostname is `unikraft` and the resolvers are
+/// 8.8.8.8 and 1.1.1.1; [`SandboxBuilder::resolv_conf`] overrides the
+/// resolver file at boot.
+///
+/// [`SandboxBuilder::resolv_conf`]: crate::SandboxBuilder::resolv_conf
+pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
     let mut archive = tar::Archive::new(tar);
-    let mut w = Writer::new(out).map_err(|e| e.to_string())?;
+    let mut w = Writer::new(out).map_err(|e| context("writing .", e))?;
     let mut has_etc = false;
-    for entry in archive.entries().map_err(|e| format!("reading tar: {e}"))? {
-        let mut entry = entry.map_err(|e| format!("reading tar: {e}"))?;
-        let Some(name) = normalize(&entry.path().map_err(|e| e.to_string())?.to_string_lossy())
-        else {
+    for entry in archive.entries().map_err(|e| context("reading tar", e))? {
+        let mut entry = entry.map_err(|e| context("reading tar", e))?;
+        let path = entry.path().map_err(|e| context("reading tar", e))?;
+        let Some(name) = normalize(&path.to_string_lossy()) else {
             continue;
         };
         if FIXED_ETC.iter().any(|(fixed, _)| *fixed == name) {
@@ -263,11 +285,11 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> Result<Stats, String> {
             // rootfs.
             _ => Ok(()),
         };
-        result.map_err(|e| format!("writing {name}: {e}"))?;
+        result.map_err(|e| context(&format!("writing {name}"), e))?;
     }
     if !has_etc {
         w.dir("etc", Attrs::root(0o755))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| context("writing etc", e))?;
     }
     for (name, contents) in FIXED_ETC {
         w.file(
@@ -276,10 +298,18 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> Result<Stats, String> {
             contents.len() as u64,
             &mut contents.as_bytes(),
         )
-        .map_err(|e| format!("writing {name}: {e}"))?;
+        .map_err(|e| context(&format!("writing {name}"), e))?;
     }
-    let (_, stats) = w.finish().map_err(|e| e.to_string())?;
+    let (_, stats) = w
+        .finish()
+        .map_err(|e| context("finishing the archive", e))?;
     Ok(stats)
+}
+
+/// `e` with what was being done, keeping its kind, so a caller can
+/// still tell a full disk from a bad archive.
+fn context(what: &str, e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("{what}: {e}"))
 }
 
 /// A tar path as a cpio name: no leading `./` or `/`, no trailing `/`;
@@ -430,5 +460,24 @@ mod tests {
         assert_eq!(normalize("./"), None);
         assert_eq!(normalize("."), None);
         assert_eq!(normalize("a"), Some("a".into()));
+    }
+
+    #[test]
+    fn errors_keep_their_kind() {
+        // A newc entry holds at most 4 GiB; the header says more.
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_path("big").unwrap();
+        header.set_size(1 << 32);
+        header.set_cksum();
+        let mut tar = header.as_bytes().to_vec();
+        tar.resize(tar.len() + 1024, 0);
+        let err = from_tar(&tar[..], io::sink()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            err.to_string(),
+            "writing big: 4294967296 bytes, over the 4 GiB a newc entry can hold"
+        );
     }
 }
