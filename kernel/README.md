@@ -20,7 +20,7 @@ The kernel is built from three git submodules pinned under `kernel/`:
 | Submodule | Source | Branch |
 |-----------|--------|--------|
 | `unikraft` | [unikraft/unikraft](https://github.com/unikraft/unikraft) | `plat-hyperlight-v2` |
-| `app-elfloader` | [danbugs/app-elfloader](https://github.com/danbugs/app-elfloader): `staging` plus three fixes, one commit each, until they are upstream: arm64 `AT_HWCAP` (upstream has it in another form, which needs a Unikraft change this kernel lacks), `AT_RANDOM` on the program's stack, and empty argument and environment strings | `plat-hyperlight-v2` |
+| `app-elfloader` | [danbugs/app-elfloader](https://github.com/danbugs/app-elfloader): `staging` plus five fixes, one commit each, until they are upstream: arm64 `AT_HWCAP` (upstream has it in another form, which needs a Unikraft change this kernel lacks), `AT_RANDOM` and `AT_EXECFN` on the program's stack, empty argument and environment strings, and freeing the ELF program record after exec | `plat-hyperlight-v2` |
 | `libs/libelf` | [unikraft/lib-libelf](https://github.com/unikraft/lib-libelf) | `staging` |
 
 ```bash

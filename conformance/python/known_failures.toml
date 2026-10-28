@@ -176,7 +176,6 @@ modules = [
     "test_logging",             # CRASH — logging uses threads + socket handlers
     "test_tempfile",            # CRASH — tempfile thread-safety tests
     "test_syslog",             # HANG  — threaded and subinterpreter syslog tests hang the scheduler
-    "test_gc",                  # CRASH — test_trashcan_threads: a sleeping thread wakes late, the guest runs out of memory (#157)
 ]
 
 [may-fix.signals]
