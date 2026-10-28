@@ -250,6 +250,30 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
     let mut absolute = String::new();
     for entry in archive.entries().map_err(|e| context("reading tar", e))? {
         let mut entry = entry.map_err(|e| context("reading tar", e))?;
+        // A PAX sparse file comes as a regular file of its map and data,
+        // named for a placeholder directory the archive never lists; the
+        // tar reader does not put it back together.
+        if let Some(pax) = entry
+            .pax_extensions()
+            .map_err(|e| context("reading tar", e))?
+        {
+            for ext in pax {
+                let ext = ext.map_err(|e| context("reading tar", e))?;
+                if ext.key().is_ok_and(|k| k.starts_with("GNU.sparse.")) {
+                    let path = entry.path().map_err(|e| context("reading tar", e))?;
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!(
+                            "{}: a PAX sparse file, which this converter cannot read",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+        }
+        // Before ustar, a directory was a regular entry named with a
+        // trailing slash, which normalizing would take away.
+        let old_dir = entry.header().as_ustar().is_none() && entry.path_bytes().ends_with(b"/");
         {
             let path = entry.path().map_err(|e| context("reading tar", e))?;
             let path = path.to_string_lossy();
@@ -277,6 +301,9 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
         use tar::EntryType as E;
         let kind_bits = match kind {
             E::Directory => S_IFDIR,
+            E::Regular if old_dir => S_IFDIR,
+            // A GNU incremental archive's directory, its data the listing.
+            _ if kind.as_byte() == b'D' => S_IFDIR,
             // The tar reader fills a sparse file's holes in.
             E::Regular | E::Continuous | E::GNUSparse => S_IFREG,
             E::Symlink | E::Link => S_IFLNK,
@@ -324,7 +351,10 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
             }
             S_IFLNK => {
                 link.clear();
-                if let Some(target) = entry.link_name().ok().flatten() {
+                let target = entry
+                    .link_name()
+                    .map_err(|e| context(&format!("reading {name}'s target"), e))?;
+                if let Some(target) = target {
                     link.push_str(&target.to_string_lossy());
                 }
                 if kind == E::Symlink {
@@ -713,6 +743,47 @@ mod tests {
         let err = from_tar(&b.into_inner().unwrap()[..], io::sink()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
         assert!(err.to_string().contains(r"TRAILER!!!\0x"), "{err}");
+    }
+
+    #[test]
+    fn reads_old_and_incremental_directories() {
+        let entry = |kind: u8, path: &str| {
+            let mut h = tar::Header::new_old();
+            h.set_entry_type(tar::EntryType::new(kind));
+            h.set_path(path).unwrap();
+            h.set_mode(0o755);
+            h.set_size(0);
+            h.set_cksum();
+            h.as_bytes().to_vec()
+        };
+        let mut tar = [entry(b'0', "old/"), entry(b'D', "inc")].concat();
+        tar.resize(tar.len() + 1024, 0);
+        let mut out = Vec::new();
+        from_tar(&tar[..], &mut out).unwrap();
+        let entries = read_cpio(&out);
+        for dir in ["old", "inc"] {
+            let (_, mode, _) = entries.iter().find(|(n, _, _)| n == dir).unwrap();
+            assert_eq!(mode & 0o170000, S_IFDIR, "{dir}");
+        }
+    }
+
+    #[test]
+    fn refuses_pax_sparse_files() {
+        let mut b = tar::Builder::new(Vec::new());
+        b.append_pax_extensions([
+            ("GNU.sparse.major", &b"1"[..]),
+            ("GNU.sparse.minor", &b"0"[..]),
+        ])
+        .unwrap();
+        let mut h = tar::Header::new_ustar();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_path("GNUSparseFile.0/f").unwrap();
+        h.set_mode(0o644);
+        h.set_size(0);
+        h.set_cksum();
+        b.append(&h, io::empty()).unwrap();
+        let err = from_tar(&b.into_inner().unwrap()[..], io::sink()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported, "{err}");
     }
 
     #[test]
