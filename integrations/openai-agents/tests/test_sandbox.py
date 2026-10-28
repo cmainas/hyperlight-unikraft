@@ -1099,7 +1099,12 @@ async def test_runner_shell_tool_runs_in_the_guest(tmp_path: Path, fake_hluk: Pa
 
 
 def _real_client() -> HyperlightSandboxClient:
-    return HyperlightSandboxClient(hluk_path=os.environ.get("HLUK_PATH"))
+    # Three times the default start limit: the first start saves the warm snapshot, which takes 3.5 to 7
+    # minutes on the nightly's Linux arm64 runner (arm64.yml).
+    return HyperlightSandboxClient(
+        hluk_path=os.environ.get("HLUK_PATH"),
+        startup_timeout_s=3 * hyperlight_sandbox.DEFAULT_HYPERLIGHT_STARTUP_TIMEOUT_S,
+    )
 
 
 def _real_options(net_allow: tuple[str, ...] = ()) -> HyperlightSandboxClientOptions:
@@ -1112,7 +1117,7 @@ def _real_options(net_allow: tuple[str, ...] = ()) -> HyperlightSandboxClientOpt
 
 # Real micro-VMs: set RUN_ALL=1 on a host with a hypervisor and `hluk` on PATH or in HLUK_PATH; HLUK_INITRD boots a
 # local image instead of the agent runtime's, at HLUK_SCRATCH_MB of memory. With RUN_ALL set they run, and fail
-# without a fit hluk rather than skip.
+# without a fit hluk rather than skip; the fresh-cache test also skips on a host with too few CPUs.
 requires_hluk = pytest.mark.skipif(
     not os.environ.get("RUN_ALL"), reason="set RUN_ALL=1 with `hluk` 0.19.0 or later for micro-VM tests"
 )
@@ -1195,6 +1200,12 @@ async def test_hluk_chmod_does_not_reach_a_read_only_grant(tmp_path: Path) -> No
 async def test_hluk_sessions_start_together_on_a_fresh_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Every session saves the guest's warm snapshot when the cache has none. The pulled image is
     # shared with the usual cache, so only the snapshots are fresh.
+    # Guests saving at once need a CPU each. On fewer, such as the nightly's Linux arm64 runner
+    # (arm64.yml), where even two at once ran past 600 s, the test says nothing.
+    guests = 4
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+    if cpus < guests:
+        pytest.skip(f"needs {guests} CPUs to start {guests} guests side by side; this process may use {cpus}")
     fresh = tmp_path / "cache"
     fresh.mkdir()
     if not os.environ.get("HLUK_INITRD"):
@@ -1205,12 +1216,12 @@ async def test_hluk_sessions_start_together_on_a_fresh_cache(tmp_path: Path, mon
         (fresh / "rootfs").symlink_to(cache / "rootfs")
     monkeypatch.setenv("HLUK_CACHE_DIR", str(fresh))
     client = _real_client()
-    sessions = [await client.create(options=_real_options()) for _ in range(4)]
+    sessions = [await client.create(options=_real_options()) for _ in range(guests)]
     try:
         starts = await asyncio.gather(*(session.start() for session in sessions), return_exceptions=True)
         assert [start for start in starts if isinstance(start, BaseException)] == []
         results = await asyncio.gather(*(session.exec("echo ok") for session in sessions))
-        assert [result.stdout for result in results] == [b"ok\n"] * 4
+        assert [result.stdout for result in results] == [b"ok\n"] * guests
     finally:
         for session in sessions:
             with contextlib.suppress(Exception):
