@@ -3,8 +3,9 @@
 
 #![cfg(feature = "cpio")]
 
+mod common;
+
 use hyperlight_unikraft::{SandboxBuilder, cpio::from_tar};
-use tracing_subscriber::layer::SubscriberExt;
 
 #[test]
 fn the_library_finds_the_driver_in_the_result() {
@@ -39,38 +40,18 @@ fn the_library_finds_the_driver_in_the_result() {
     // the entry out of our archive, and the kernel found it in the
     // unpacked initrd.  An archive the host could not read would boot
     // nothing and say so differently.
-    // Its messages are Hyperlight's guest log.
-    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let subscriber = tracing_subscriber::registry().with(GuestLog(log.clone()));
-    tracing::subscriber::with_default(subscriber, || {
+    let (_sandbox, log) = common::guest_log(|| {
+        // The driver's name would size the guest for node; booting is all
+        // this needs.
         SandboxBuilder::from_initrd(&path)
+            .scratch_mb(64)
             .guest_log_level(tracing::level_filters::LevelFilter::ERROR)
             .boot()
             .unwrap()
     });
-    let log = log.lock().unwrap();
     assert!(
-        log.contains("/usr/local/bin/hl_nodedriver: Image format not recognized"),
-        "the kernel did not try our driver: {log}"
+        log.iter()
+            .any(|l| l.contains("/usr/local/bin/hl_nodedriver: Image format not recognized")),
+        "the kernel did not try our driver: {log:#?}"
     );
-}
-
-/// The messages of Hyperlight's guest log, a line each.
-struct GuestLog(std::sync::Arc<std::sync::Mutex<String>>);
-
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for GuestLog {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        struct Message<'a>(&'a mut String);
-        impl tracing::field::Visit for Message<'_> {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    use std::fmt::Write;
-                    let _ = writeln!(self.0, "{value:?}");
-                }
-            }
-        }
-        if event.metadata().target() == "hyperlight_guest" {
-            event.record(&mut Message(&mut self.0.lock().unwrap()));
-        }
-    }
 }
