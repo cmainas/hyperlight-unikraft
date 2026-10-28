@@ -35,6 +35,7 @@ pub use hyperlight_host::{HostFunctions, sandbox::snapshot::Snapshot};
 
 use tracing::{debug, info};
 
+mod cgroup;
 #[cfg(feature = "cpio")]
 pub mod cpio;
 mod errno;
@@ -43,6 +44,7 @@ mod hostnet;
 pub mod net_policy;
 mod profile;
 
+pub use cgroup::{CONTAINER_SCRATCH_HEADROOM_MB, cgroup_memory_limit_mb, scratch_mb_within};
 pub use hostfs::{DirEntry, FileStat, FsBackend, S_IFDIR, S_IFMT, S_IFREG};
 pub use net_policy::{
     AllowList, BlockList, Destination, Filter, ListenPorts, NetworkFilter, NetworkPolicy,
@@ -634,6 +636,17 @@ fn describe_snapshot_tag(tag: &str) -> String {
         Some(key) => format!("{} ({key})", &tag[..tag.len() - key.len() - 1]),
         None => tag.to_string(),
     }
+}
+
+/// A MiB, the unit guest memory is sized in.
+pub const MIB: usize = 1024 * 1024;
+
+/// `n` MiB as a guest memory size: more than nothing, and a byte count
+/// that fits.
+pub fn scratch_mb_from(n: u64) -> Option<usize> {
+    usize::try_from(n)
+        .ok()
+        .filter(|mb| *mb > 0 && mb.checked_mul(MIB).is_some())
 }
 
 /// Write a snapshot from [`AppSandbox::snapshot`] to `dir` as an OCI image
@@ -2089,7 +2102,7 @@ fn assemble_sandbox(
     guest_log_level: Option<tracing::level_filters::LevelFilter>,
     console: Console,
 ) -> Result<(UninitializedSandbox, GuestConfig)> {
-    let scratch_size = scratch_mb * 1024 * 1024;
+    let scratch_size = scratch_mb * MIB;
     info!(scratch_mb, "guest memory");
     let mut cfg = SandboxConfiguration::default();
     cfg.set_scratch_size(scratch_size);
