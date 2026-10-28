@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The Hyperlight Authors.
 
+#![cfg(feature = "cpio")]
+
 use hyperlight_unikraft::{SandboxBuilder, cpio::from_tar};
 use tracing_subscriber::layer::SubscriberExt;
 

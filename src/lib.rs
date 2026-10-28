@@ -35,6 +35,7 @@ pub use hyperlight_host::{HostFunctions, sandbox::snapshot::Snapshot};
 
 use tracing::{debug, info};
 
+#[cfg(feature = "cpio")]
 pub mod cpio;
 mod errno;
 mod hostfs;

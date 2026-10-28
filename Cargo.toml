@@ -18,6 +18,9 @@ path = "src/main.rs"
 [features]
 default = ["cli"]
 cli = [
+    "cpio",
+    # The registry and GitHub clients read tar archives too.
+    "dep:tar",
     "dep:clap",
     "dep:tracing-subscriber",
     "dep:serde",
@@ -31,6 +34,8 @@ cli = [
 # whole build out of the MADV_DONTNEED fast restore path (see the dependency
 # comment below), so `hluk` on KVM stays fast; turn this on to run on MSHV.
 mshv = ["hyperlight-host/mshv3"]
+# `cpio::from_tar`, building an initrd from a tar without a host `cpio`.
+cpio = ["dep:tar"]
 
 [dependencies]
 hyperlight-common = "0.18"
@@ -50,7 +55,8 @@ cap-fs-ext = "4"
 # through hyperlight-host.
 getrandom = "0.4"
 rustix = { version = "1", features = ["net", "event"] }
-tar = "0.4"
+# Nothing here unpacks archives onto disk, so no xattr support.
+tar = { version = "0.4", default-features = false, optional = true }
 
 # Optional — CLI only.
 clap = { version = "4", features = ["derive"], optional = true }
