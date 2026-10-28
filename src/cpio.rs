@@ -274,27 +274,24 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
         }
         let header = entry.header();
         let kind = header.entry_type();
-        // Extended headers are consumed by the tar reader; anything else
-        // (a sparse file, a GNU volume header) has no place in a rootfs,
-        // and is dropped before its ids can refuse the image.
         use tar::EntryType as E;
-        if !matches!(
-            kind,
-            E::Directory
-                | E::Regular
-                | E::Continuous
-                | E::Symlink
-                | E::Link
-                | E::Char
-                | E::Block
-                | E::Fifo
-        ) {
-            continue;
-        }
+        let kind_bits = match kind {
+            E::Directory => S_IFDIR,
+            // The tar reader fills a sparse file's holes in.
+            E::Regular | E::Continuous | E::GNUSparse => S_IFREG,
+            E::Symlink | E::Link => S_IFLNK,
+            E::Char => S_IFCHR,
+            E::Block => S_IFBLK,
+            E::Fifo => S_IFIFO,
+            // Extended headers are consumed by the tar reader; anything else
+            // (a GNU volume header) has no place in a rootfs, and is dropped
+            // before its ids can refuse the image.
+            _ => continue,
+        };
         if name == "etc" {
             // The fixed files go under it, and through a link they would
             // land somewhere else, or nowhere.
-            if !kind.is_dir() {
+            if kind_bits != S_IFDIR {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "etc: not a directory, and /etc/hosts and the rest need one",
@@ -302,7 +299,6 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
             }
             has_etc = true;
         }
-        let header = entry.header();
         let id = |id: u64, what: &str| {
             u32::try_from(id).map_err(|_| {
                 io::Error::new(
@@ -318,48 +314,50 @@ pub fn from_tar(tar: impl Read, out: impl Write) -> io::Result<Stats> {
             // A time past 2106 is no reason to refuse an image.
             mtime: u32::try_from(header.mtime().unwrap_or(0)).unwrap_or(u32::MAX),
         };
-        link.clear();
-        if let Some(target) = entry.link_name().ok().flatten() {
-            link.push_str(&target.to_string_lossy());
-        }
-        let result = match kind {
-            tar::EntryType::Directory => w.dir(name, attrs),
-            tar::EntryType::Regular | tar::EntryType::Continuous => {
+        let result = match kind_bits {
+            S_IFDIR => w.dir(name, attrs),
+            S_IFREG => {
                 // The entry's, not the header's: past 8 GiB the size is in
                 // a PAX record and the header says 0.
                 let size = entry.size();
                 w.file(name, attrs, size, &mut entry)
             }
-            // ukcpio cannot make a link to nothing.
-            tar::EntryType::Symlink if link.is_empty() => Ok(()),
-            tar::EntryType::Symlink => w.symlink(name, &link, attrs),
-            // A hard link becomes a symlink to its target: the archive is
-            // streamed, so the target's data is gone by the time the link
-            // arrives, and a read-only rootfs cannot tell the two apart.
-            tar::EntryType::Link => match normalize(&link) {
-                Some(target) => {
-                    absolute.clear();
-                    absolute.push('/');
-                    absolute.push_str(target);
-                    w.symlink(name, &absolute, attrs)
+            S_IFLNK => {
+                link.clear();
+                if let Some(target) = entry.link_name().ok().flatten() {
+                    link.push_str(&target.to_string_lossy());
                 }
-                // A link to nothing, or to the root, has no file to stand for.
-                None => Ok(()),
-            },
-            tar::EntryType::Char | tar::EntryType::Block | tar::EntryType::Fifo => {
-                let kind_bits = match kind {
-                    tar::EntryType::Char => S_IFCHR,
-                    tar::EntryType::Block => S_IFBLK,
-                    _ => S_IFIFO,
-                };
+                if kind == E::Symlink {
+                    // ukcpio cannot make a link to nothing.
+                    if link.is_empty() {
+                        Ok(())
+                    } else {
+                        w.symlink(name, &link, attrs)
+                    }
+                } else {
+                    // A hard link becomes a symlink to its target: the
+                    // archive is streamed, so the target's data is gone by
+                    // the time the link arrives, and a read-only rootfs
+                    // cannot tell the two apart.  A link to nothing, or to
+                    // the root, has no file to stand for.
+                    match normalize(&link) {
+                        Some(target) => {
+                            absolute.clear();
+                            absolute.push('/');
+                            absolute.push_str(target);
+                            w.symlink(name, &absolute, attrs)
+                        }
+                        None => Ok(()),
+                    }
+                }
+            }
+            _ => {
                 let rdev = (
                     header.device_major().ok().flatten().unwrap_or(0),
                     header.device_minor().ok().flatten().unwrap_or(0),
                 );
                 w.special(name, kind_bits, attrs, rdev)
             }
-            // Dropped above.
-            _ => Ok(()),
         };
         result.map_err(|e| context(&format!("writing {name}"), e))?;
     }
