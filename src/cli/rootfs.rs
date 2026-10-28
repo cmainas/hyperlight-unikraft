@@ -533,27 +533,55 @@ pub fn build_dockerfile(
 
 /// `docker export` the container to `output` as a CPIO.
 fn export(cid: &str, output: &Path) -> Result<cpio::Stats, String> {
-    let mut child = Command::new("docker")
+    // Before docker starts, so a failure here leaves no child to reap.
+    let part = output.with_extension("cpio.part");
+    let file =
+        fs::File::create(&part).map_err(|e| format!("cannot write {}: {e}", part.display()))?;
+    let mut child = match Command::new("docker")
         .args(["export", cid])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
-        .map_err(docker_error)?;
-    let tar = child.stdout.take().expect("piped");
-    let part = output.with_extension("cpio.part");
-    let stats = {
-        let file =
-            fs::File::create(&part).map_err(|e| format!("cannot write {}: {e}", part.display()))?;
-        let result = cpio::from_tar(tar, std::io::BufWriter::new(file)).map_err(|e| e.to_string());
-        let status = child.wait().map_err(|e| e.to_string())?;
-        if !status.success() {
+    {
+        Ok(child) => child,
+        Err(e) => {
             let _ = fs::remove_file(&part);
-            return Err(format!("docker export failed ({status})"));
+            return Err(docker_error(e));
         }
-        result.inspect_err(|_| {
-            let _ = fs::remove_file(&part);
-        })?
     };
+    let mut tar = child.stdout.take().expect("piped");
+    // Borrowed, so the pipe stays open until docker's fate is known: a
+    // closed pipe kills it with SIGPIPE, which would read as its failure.
+    let result = cpio::from_tar(&mut tar, std::io::BufWriter::new(file));
+    // A conversion that fails while docker still streams is the cause; it
+    // is killed, and its status after that says nothing.  If docker had
+    // already exited, its stream may have been cut short, so both count.
+    // Docker's own reason, if any, is on its stderr, which is ours.
+    let killed =
+        result.is_err() && !matches!(child.try_wait(), Ok(Some(_))) && child.kill().is_ok();
+    if result.is_ok() {
+        // The tar reader stops at the first end block; docker may still be
+        // writing the rest of its stream.
+        let _ = std::io::copy(&mut tar, &mut std::io::sink());
+    }
+    drop(tar);
+    let status = match child.wait() {
+        Err(e) => Err(format!("waiting for docker export: {e}")),
+        Ok(status) if !killed && !status.success() => {
+            Err(format!("docker export failed ({status})"))
+        }
+        Ok(_) => Ok(()),
+    };
+    let result = match (result, status) {
+        // After a kill, only a failed wait comes back as Err.
+        (Err(e), Err(docker)) => Err(format!("{docker}: {e}")),
+        (Err(e), _) => Err(e.to_string()),
+        (Ok(_), Err(docker)) => Err(docker),
+        (Ok(stats), Ok(())) => Ok(stats),
+    };
+    let stats = result.inspect_err(|_| {
+        let _ = fs::remove_file(&part);
+    })?;
     fs::rename(&part, output)
         .map_err(|e| format!("cannot move into place {}: {e}", output.display()))?;
     Ok(stats)
