@@ -1487,6 +1487,98 @@ fn python_out_of_memory_is_a_kill() {
     }
 }
 
+/// The memory of a large file goes back to programs once the file is
+/// deleted: after three 40 MiB files came and went, a child can allocate
+/// 120 MiB (the kernel kept about three times a file's size before).
+#[test]
+fn python_deleted_file_memory_is_reused() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            "import os, subprocess, sys\n\
+             for _ in range(3):\n\
+             \x20   with open('/tmp/big', 'wb') as f:\n\
+             \x20       for _ in range(40):\n\
+             \x20           f.write(b'x' * (1 << 20))\n\
+             \x20   os.unlink('/tmp/big')\n\
+             r = subprocess.run([sys.executable, '-c', 'b = bytearray(120 << 20)'])\n\
+             print('child', r.returncode)",
+        )
+        .unwrap();
+    assert_eq!(sandbox.drain_output(), "child 0\n");
+}
+
+/// With a child holding all but a few MiB, the parent's file write fails
+/// with ENOSPC, as on a full tmpfs, instead of the guest's kernel faulting
+/// with no memory left; the parent can still kill the child, and the write
+/// works once it is gone. The buffer written is made before the child fills
+/// memory, so that the write, not the parent's own page fault, runs out.
+#[test]
+fn python_full_guest_fails_the_write_not_the_guest() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            "import os, subprocess, sys\n\
+             chunk = b'x' * (1 << 20)\n\
+             hog = subprocess.Popen([sys.executable, '-c',\n\
+             \x20   'import os, sys\\n'\n\
+             \x20   'l = []\\n'\n\
+             \x20   'page = os.sysconf(\"SC_PAGE_SIZE\")\\n'\n\
+             \x20   'while os.sysconf(\"SC_AVPHYS_PAGES\") * page > (8 << 20): l.append(bytearray(1 << 20))\\n'\n\
+             \x20   'print(\"holding\", flush=True)\\n'\n\
+             \x20   'sys.stdin.read()\\n'],\n\
+             \x20   stdin=subprocess.PIPE, stdout=subprocess.PIPE)\n\
+             print('hog:', hog.stdout.readline().decode().strip())\n\
+             def write():\n\
+             \x20   try:\n\
+             \x20       with open('/tmp/big', 'wb') as f:\n\
+             \x20           for _ in range(32):\n\
+             \x20               f.write(chunk)\n\
+             \x20       return 'ok'\n\
+             \x20   except OSError as e:\n\
+             \x20       return os.strerror(e.errno)\n\
+             print('full:', write())\n\
+             hog.kill()\n\
+             print('killed:', hog.wait())\n\
+             print('after:', write())",
+        )
+        .unwrap();
+    assert_eq!(
+        sandbox.drain_output(),
+        "hog: holding\nfull: No space left on device\nkilled: -9\nafter: ok\n"
+    );
+}
+
+/// An epoll instance cannot watch itself (EINVAL, as on Linux); closing it
+/// after the attempt used to crash the guest.
+#[test]
+fn python_epoll_refuses_itself() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs).boot().unwrap();
+    sandbox
+        .run(
+            "import os, select\n\
+             ep = select.epoll()\n\
+             try:\n\
+             \x20   ep.register(ep.fileno(), select.EPOLLIN)\n\
+             \x20   print('registered')\n\
+             except OSError as e:\n\
+             \x20   print(os.strerror(e.errno))\n\
+             ep.close()\n\
+             print('closed')",
+        )
+        .unwrap();
+    assert_eq!(sandbox.drain_output(), "Invalid argument\nclosed\n");
+}
+
 /// A variable the guest had and the host set over it for a while has the
 /// guest's own value again once the host stops sending it.
 #[test]
