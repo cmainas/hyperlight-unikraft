@@ -41,9 +41,11 @@ if mode == "fail_before":
     sys.exit(1)
 if mode == "hang_before":
     time.sleep(60)
+if mode == "note_before":
+    sys.stderr.write("note: the guest gets 256 MiB but the memory limit hluk runs under is 200 MiB\\n")
 sys.stderr.write({hyperlight._STARTED_MARKER!r} + "\\n")
 sys.stderr.flush()
-if mode == "success":
+if mode in ("success", "note_before"):
     sys.stdout.write("3\\n")
     sys.stderr.write("warning\\n")
 elif mode == "runtime_error":
@@ -189,7 +191,19 @@ def test_failures_are_logged(fake_hluk, monkeypatch, caplog):
     monkeypatch.setenv("FAKE_HLUK_PREPARE_RC", "0")
     monkeypatch.setenv("FAKE_HLUK_MODE", "fail_before")
     run_case("hyperlight://", "pass", None, 5, 256)
-    assert "before the code ran" in caplog.text
+    assert "hluk exited with 1 before the code ran" in caplog.text
+
+
+def test_what_hluk_says_before_the_code_ran_is_logged_not_returned(fake_hluk, monkeypatch, caplog):
+    monkeypatch.setenv("FAKE_HLUK_MODE", "note_before")
+    monkeypatch.setattr(hyperlight, "_notes_logged", set())
+    for _ in range(2):
+        response, error = run_case("hyperlight://", "print(3)", None, 5, 256)
+        assert error is None and response["status"] == "Success"
+        assert response["run_result"]["stdout"] == "3\n"
+        assert response["run_result"]["stderr"] == "warning\n"
+    # The same note comes with every case; it is logged once.
+    assert caplog.text.count("hluk said before the code ran: note: the guest gets 256 MiB") == 1
 
 
 def test_warm_imports_cover_the_call_based_wrapper():

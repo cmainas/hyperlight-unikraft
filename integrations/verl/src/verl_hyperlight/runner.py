@@ -496,6 +496,8 @@ class _Watchdog:
 
 _setpriv: Optional[str] = None
 _warned_no_setpriv = threading.Event()
+# What hluk said before the code ran, logged once each: the same note comes with every case.
+_notes_logged: set[str] = set()
 
 
 def _setpriv_path() -> Optional[str]:
@@ -545,8 +547,10 @@ def _read_bounded(stream: IO[bytes], into: list[bytes]) -> None:
     into += [bytes(kept), truncated]
 
 
-def _tail(data: bytes) -> str:
-    return data.decode(errors="replace").strip()[-500:]
+def _tail(data: bytes | str) -> str:
+    if isinstance(data, bytes):
+        data = data.decode(errors="replace")
+    return data.strip()[-500:]
 
 
 def _sandbox_error(message: str) -> dict[str, Any]:
@@ -700,7 +704,14 @@ def _run_case(
     if _early_failures.get(guest):
         with _early_failures_lock:
             _early_failures[guest] = 0
-    err = err.replace(_STARTED_MARKER + "\n", "", 1)
+    # What hluk itself said before the code ran, a note on the memory limit it runs under, say,
+    # is the backend's to log, not the solution's stderr.
+    said, _, err = err.partition(_STARTED_MARKER)
+    err = err.removeprefix("\n")
+    note = _tail(said)
+    if note and note not in _notes_logged:
+        _notes_logged.add(note)
+        logger.warning("Hyperlight backend: hluk said before the code ran: %s", note)
     for name, truncated in (("stdout", out_truncated), ("stderr", err_truncated)):
         if truncated:
             err += f"\n[verl hyperlight: {name} truncated at {MAX_OUTPUT_BYTES} bytes]\n"
