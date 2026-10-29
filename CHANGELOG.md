@@ -4,6 +4,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Prerelease] - Unreleased
 
+### Fixed
+
+- A file written in pieces in the guest's in-memory filesystem was copied whole for every piece, as the filesystem grew a file's buffer to exactly the new size each time: `head -c` writing 4 KiB at a time took 28 s for 25 MB and 163 s for 50 MB, and the guest answered nothing meanwhile (one `GET /` in 81 answered). The buffer now grows by half at least, so a file is copied a bounded number of times over however it is written: 0.3 s and 0.5 s, with the guest answering throughout. The room past the file's end holds no memory until the file grows into it, and a truncate gives back what it cuts off, so a nearly full filesystem fails no earlier than before. Stock Unikraft on QEMU has the same growth (`dd bs=4096`: 1.3 s for 10 MB, 13.5 s for 25 MB).
+- A write to a file in the guest's in-memory filesystem at an offset so far past its end that the offset and the length together outgrew an offset (`pwrite()` near `LONG_MAX`) crashed the guest; as on Linux, the write is now cut short where an offset ends, and fails with `ENOSPC` for a file no memory holds or `EFBIG` at the end itself. A write longer than 2 GiB is cut short too, and reports what it wrote.
+
 ## [v0.20.0]
 
 ### Added

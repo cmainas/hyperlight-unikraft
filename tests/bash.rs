@@ -3,6 +3,7 @@
 mod common;
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use common::{guest_log, hluk_with_stdin, require_rootfs, temp_dir};
 use hyperlight_unikraft::{Exec, SandboxBuilder, load_snapshot, snapshot_scratch_mb};
@@ -415,4 +416,31 @@ fn bash_commands_back_to_back_give_their_memory_back() {
         .run("for i in $(seq 3000); do /bin/true || echo \"failed at $i\"; done; echo loop-done")
         .unwrap();
     assert_eq!(sandbox.drain_output(), "loop-done\n");
+}
+
+/// A file written in small pieces is copied a bounded number of times
+/// over, not once per piece: the kernel grows a file by half at least.
+/// Grown to the exact size each time, 50 MB in 4 KiB pieces took minutes,
+/// and the guest ran nothing else meanwhile.
+#[test]
+fn bash_writing_a_file_in_pieces_is_not_quadratic() {
+    let rootfs = require_rootfs("bash");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    let started = Instant::now();
+    sandbox
+        .run("yes 2>/dev/null | head -c 50000000 > /tmp/pieces; wc -c < /tmp/pieces; md5sum /tmp/pieces")
+        .unwrap();
+    let took = started.elapsed();
+    let output = sandbox.drain_output();
+    assert!(
+        output.contains("50000000\n") && output.contains("c4915951b5afe50190151c7cfeb3989b"),
+        "expected the file whole, got: {output:?}"
+    );
+    assert!(
+        took < Duration::from_secs(30),
+        "50 MB in pieces took {took:?}: the file is being copied for every piece"
+    );
 }
