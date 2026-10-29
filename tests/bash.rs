@@ -431,16 +431,79 @@ fn bash_writing_a_file_in_pieces_is_not_quadratic() {
         .unwrap();
     let started = Instant::now();
     sandbox
-        .run("yes 2>/dev/null | head -c 50000000 > /tmp/pieces; wc -c < /tmp/pieces; md5sum /tmp/pieces")
+        .run("yes 2>/dev/null | head -c 50000000 > /tmp/pieces")
         .unwrap();
     let took = started.elapsed();
+    sandbox
+        .run("wc -c < /tmp/pieces; md5sum /tmp/pieces")
+        .unwrap();
     let output = sandbox.drain_output();
     assert!(
         output.contains("50000000\n") && output.contains("c4915951b5afe50190151c7cfeb3989b"),
         "expected the file whole, got: {output:?}"
     );
+    // About half a second here; 163 s when every piece copied the file. The bound
+    // leaves room for a slow runner without reaching the quadratic case.
     assert!(
-        took < Duration::from_secs(30),
+        took < Duration::from_secs(60),
         "50 MB in pieces took {took:?}: the file is being copied for every piece"
+    );
+}
+
+/// A file appended to between closes reads back whole: the room a write
+/// leaves past the file's end stays the file's, and the next open's append
+/// grows into it.
+#[test]
+fn bash_appends_between_closes_read_back_whole() {
+    let rootfs = require_rootfs("bash");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run("for i in $(seq 1 20000); do echo \"line $i of the log\" >> /tmp/log; done; wc -l < /tmp/log; md5sum /tmp/log")
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(
+        output.contains("20000\n") && output.contains("c6630dd553242c57170979d6d113445a"),
+        "expected the log whole, got: {output:?}"
+    );
+}
+
+/// What a truncate cut off does not come back when the file grows again
+/// into the room it had, by a write or by a truncate: the gap reads as zeros.
+#[test]
+fn bash_a_file_grown_again_after_a_cut_reads_zeros_in_the_gap() {
+    let rootfs = require_rootfs("bash");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run("printf aaaaaaaaaa > /tmp/t; truncate -s 5 /tmp/t; printf bbb >> /tmp/t; truncate -s 12 /tmp/t; printf ccc >> /tmp/t; od -An -c /tmp/t | tr -s ' '")
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(
+        output.contains("a a a a a b b b \\0 \\0 \\0 \\0 c c c"),
+        "expected aaaaa bbb, four zeros, ccc, got: {output:?}"
+    );
+}
+
+/// A file moved to another directory keeps growing as before: the record of
+/// how much of its buffer has memory behind it moves with the buffer.
+#[test]
+fn bash_a_file_moved_across_directories_grows_on() {
+    let rootfs = require_rootfs("bash");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run("mkdir -p /var/moved; printf x > /tmp/a; mv /tmp/a /var/moved/a; printf y >> /var/moved/a; yes 2>/dev/null | head -c 30000 >> /var/moved/a; mv /var/moved/a /tmp/b; printf z >> /tmp/b; head -c 2 /tmp/b; echo; wc -c < /tmp/b; tail -c 1 /tmp/b; echo")
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(
+        output.contains("xy\n") && output.contains("30003\n") && output.ends_with("z\n"),
+        "expected the moved file whole and grown, got: {output:?}"
     );
 }

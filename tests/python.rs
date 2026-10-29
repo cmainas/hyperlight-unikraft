@@ -1888,3 +1888,43 @@ fn python_failures_print_only_their_own_words() {
     ));
     assert_eq!(sandbox.drain_stderr(), "");
 }
+
+/// A write far past the end of a file fails, as on Linux, not a crash: cut
+/// short where an offset ends, it is ENOSPC for a file no memory holds, and
+/// EFBIG at the end itself. The file is left as it was.
+#[test]
+fn python_write_far_past_the_end_fails_cleanly() {
+    let rootfs = require_rootfs("python");
+    let mut sandbox = SandboxBuilder::from_initrd(rootfs)
+        .scratch_mb(256)
+        .boot()
+        .unwrap();
+    sandbox
+        .run(
+            r#"import os
+fd = os.open("/tmp/f", os.O_RDWR | os.O_CREAT)
+os.write(fd, b"x")
+# The write is cut short where an offset ends, and the file cannot grow to there.
+try:
+    os.pwrite(fd, b"y" * 8000, 2**63 - 4000)
+    print("wrote")
+except OSError as e:
+    print("near the end: errno", e.errno)
+# At the end itself nothing can be written.
+try:
+    os.pwrite(fd, b"y", 2**63 - 1)
+    print("wrote")
+except OSError as e:
+    print("at the end: errno", e.errno)
+print("size", os.fstat(fd).st_size)
+"#,
+        )
+        .unwrap();
+    let output = sandbox.drain_output();
+    assert!(
+        output.contains("near the end: errno 28")
+            && output.contains("at the end: errno 27")
+            && output.contains("size 1"),
+        "expected ENOSPC near the end, EFBIG at it, and the file untouched, got: {output:?}"
+    );
+}
