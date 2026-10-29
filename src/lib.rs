@@ -26,8 +26,10 @@ use std::time::{Duration, Instant};
 pub use hyperlight_host;
 
 use hyperlight_host::{
-    GuestBinary, HyperlightError, Sandbox, UninitializedSandbox, func::Registerable,
-    sandbox::SandboxConfiguration, sandbox::snapshot::OciTag,
+    GuestBinary, HyperlightError, Sandbox, UninitializedSandbox,
+    func::Registerable,
+    sandbox::SandboxConfiguration,
+    sandbox::snapshot::{OciTag, SnapshotOptions},
 };
 
 // Re-export snapshot types so dependents don't need hyperlight-host directly.
@@ -679,11 +681,12 @@ fn record_scratch_mb(snapshot: Arc<Snapshot>, scratch_mb: Option<usize>) -> Resu
     )?)
 }
 
-/// Write a snapshot from [`AppSandbox::snapshot`] to `dir` as an OCI image
-/// layout, named by this release and its [`SNAPSHOT_KEY`].  Another
-/// process, or a later run of this one, reads it back with
-/// [`load_snapshot`], [`SandboxBuilder::from_snapshot_dir`] or
-/// [`AppSandbox::restore_from`]; any build with the same key can, since
+/// Write a snapshot from [`AppSandbox::snapshot`] (or
+/// [`AppSandbox::snapshot_with_scratch_mb`], whose scratch size it keeps)
+/// to `dir` as an OCI image layout, named by this release and its
+/// [`SNAPSHOT_KEY`].  Another process, or a later run of this one, reads
+/// it back with [`load_snapshot`], [`SandboxBuilder::from_snapshot_dir`]
+/// or [`AppSandbox::restore_from`]; any build with the same key can, since
 /// the key is the kernel and the host contract a snapshot depends on.
 /// [`AppSandbox::snapshot_to`] does both steps in one.
 pub fn save_snapshot(snapshot: &Snapshot, dir: impl AsRef<Path>) -> Result<()> {
@@ -2117,6 +2120,13 @@ fn fstab_arg(mounts: &[Mount]) -> Result<String> {
     Ok(format!(" vfs.fstab=[{entries}]"))
 }
 
+/// MiB to bytes, saturating: a size that overflows is larger than any
+/// hyperlight accepts, so it is rejected as too big, against the maximum
+/// memory size.
+fn mb_to_bytes(mb: usize) -> usize {
+    mb.saturating_mul(MIB)
+}
+
 /// Assemble the uninitialized sandbox and its [`GuestConfig`] from the
 /// pieces a [`SandboxBuilder`] gathered.  `kernel` is `None` for the
 /// embedded [`KERNEL`], `Some` for an external one; `initrd` is `None`
@@ -2135,7 +2145,7 @@ fn assemble_sandbox(
     guest_log_level: Option<tracing::level_filters::LevelFilter>,
     console: Console,
 ) -> Result<(UninitializedSandbox, GuestConfig)> {
-    let scratch_size = scratch_mb * MIB;
+    let scratch_size = mb_to_bytes(scratch_mb);
     info!(scratch_mb, "guest memory");
     let mut cfg = SandboxConfiguration::default();
     cfg.set_scratch_size(scratch_size);
@@ -2327,6 +2337,9 @@ impl SandboxBuilder {
     /// The [`mount`](Self::mount)s given here are the restored guest's: on
     /// its `resume` entry the kernel makes its mount table match them, so a
     /// snapshot saved without mounts serves any mount set.
+    ///
+    /// The sandbox gets the snapshot's scratch size: `mb` for a snapshot
+    /// from [`AppSandbox::snapshot_with_scratch_mb`].
     pub fn from_snapshot(snapshot: Arc<Snapshot>) -> Self {
         Self {
             snapshot: Some(snapshot),
@@ -2335,7 +2348,7 @@ impl SandboxBuilder {
     }
 
     /// [`from_snapshot`](Self::from_snapshot) with the snapshot read from
-    /// `dir`, where [`AppSandbox::snapshot_to`] wrote it.
+    /// `dir`, where [`AppSandbox::snapshot_to`] or [`save_snapshot`] wrote it.
     pub fn from_snapshot_dir(dir: impl AsRef<Path>) -> Result<Self> {
         Ok(Self::from_snapshot(load_snapshot(dir)?))
     }
@@ -2964,9 +2977,7 @@ impl AppSandbox {
     /// driver ([`Error::NoDriver`]), or already has a call in flight
     /// ([`Error::CallInFlight`]: the kernel serves one at a time).
     pub fn submit(&mut self, exec: impl Into<Exec>) -> Result<()> {
-        if let Some(Yield::Exited { status }) = self.exited {
-            return Err(Error::GuestExited { status });
-        }
+        self.ensure_running()?;
         // The kernel would reject it too (nothing reads /dev/hlcall);
         // refusing here is earlier and says why.
         if !self.has_driver() {
@@ -3111,11 +3122,61 @@ impl AppSandbox {
     /// Errors with [`Error::GuestExited`] once the guest process has
     /// exited: there is nothing left to resume.
     pub fn snapshot(&mut self) -> Result<Arc<Snapshot>> {
-        if let Some(Yield::Exited { status }) = self.exited {
-            return Err(Error::GuestExited { status });
-        }
+        self.ensure_running()?;
         let snapshot = self.sandbox.snapshot()?;
         record_scratch_mb(snapshot, self.config.scratch_size.map(|size| size / MIB))
+    }
+
+    /// [`snapshot`](Self::snapshot), but a sandbox restored from it gets
+    /// `mb` MiB of scratch.  Booting needs room to unpack the rootfs; guest
+    /// function calls need far less, so restores of a smaller snapshot cost
+    /// less.  A larger one gives guest function calls more room than the
+    /// sandbox booted with.  The snapshot records `mb`
+    /// ([`snapshot_scratch_mb`]).
+    ///
+    /// - `mb` above hyperlight's maximum memory size errors with
+    ///   `Error::Hyperlight(MemoryRequestTooBig)`.
+    /// - A size too small for the transport errors with
+    ///   `Error::Hyperlight(MemoryRequestTooSmall)` before the guest is
+    ///   entered.  Room for the page tables is checked when the snapshot is
+    ///   built, after any pending transport checkpoint has run in the guest;
+    ///   that error, the same variant, leaves the sandbox usable.  So does
+    ///   the error for a larger size whose scratch would cover a guest
+    ///   mapping, which the kernel does not make.
+    /// - Whether the kernel fits is not checked.  If it does not,
+    ///   [`restore`](Self::restore) fails with
+    ///   `Error::Hyperlight(GuestAborted)`; until a restore of a snapshot
+    ///   that fits recovers the sandbox, a guest function call fails with
+    ///   [`Error::NoDriver`] and a snapshot with
+    ///   `Error::Hyperlight(PoisonedSandbox)`.  A new sandbox booted from
+    ///   the snapshot fails to boot, with `Error::Hyperlight(GuestAborted)`.
+    /// - Scratch also holds the transport, page tables and the kernel's own
+    ///   state, so a guest function call gets less than `mb`.  One that
+    ///   runs out either gets its process killed when the kernel's memory
+    ///   budget runs out ([`Error::GuestExited`], status 137, with a
+    ///   single-process driver such as python's), or aborts the guest
+    ///   (`Error::Hyperlight(GuestAborted)`) when scratch itself runs out,
+    ///   which copies of the snapshot's pages also draw on.  A restore
+    ///   recovers the sandbox from either.
+    /// - At the sandbox's own size this is [`snapshot`](Self::snapshot);
+    ///   any other size captures a new snapshot each time, so keep the
+    ///   result.
+    /// - Errors with [`Error::GuestExited`] once the guest process has
+    ///   exited.
+    pub fn snapshot_with_scratch_mb(&mut self, mb: usize) -> Result<Arc<Snapshot>> {
+        self.ensure_running()?;
+        let options = SnapshotOptions::default().scratch_size(mb_to_bytes(mb));
+        let snapshot = self.sandbox.snapshot_with_options(&options)?;
+        record_scratch_mb(snapshot, Some(mb))
+    }
+
+    /// A guest that has exited cannot serve a guest function call or be
+    /// snapshotted.
+    fn ensure_running(&self) -> Result<()> {
+        match self.exited {
+            Some(Yield::Exited { status }) => Err(Error::GuestExited { status }),
+            _ => Ok(()),
+        }
     }
 
     /// [`snapshot`](Self::snapshot), then [`save_snapshot`] it to `dir`.
@@ -3129,18 +3190,23 @@ impl AppSandbox {
     /// Restore a snapshot into this sandbox in place and put the restored
     /// guest right for this host with a `resume` entry, as
     /// [`SandboxBuilder::boot`] does, with this sandbox's mounts.
+    ///
+    /// The sandbox takes the snapshot's scratch size.  If a resized
+    /// snapshot is too small for the kernel, the restore fails, and until a
+    /// restore of a snapshot that fits succeeds, guest function calls fail
+    /// with [`Error::NoDriver`], snapshots with
+    /// `Error::Hyperlight(PoisonedSandbox)`, and [`step`](Self::step) and
+    /// [`join`](Self::join) with [`Error::Deadlocked`].
     pub fn restore(&mut self, snapshot: Arc<Snapshot>) -> Result<()> {
         let recorded = snapshot_scratch_mb(&snapshot);
         let sandbox = &mut self.sandbox;
         self.config
             .profile
             .time("restore: hyperlight", || sandbox.restore(snapshot))?;
-        // A restore in place keeps the sandbox's memory layout, so its
-        // size stands; a snapshot that recorded one makes it known where
-        // it was not.
-        if let Some(mb) = recorded {
-            self.config.scratch_size = Some(mb * MIB);
-        }
+        // The sandbox takes the snapshot's scratch size, which can differ
+        // from its own: known where the snapshot recorded it, unknown
+        // where it did not.
+        self.config.scratch_size = recorded.map(mb_to_bytes);
         // The host sockets belong to the guest state just discarded; the
         // restored guest re-creates the ones it holds on its resume entry.
         if let Some(net) = &self.config.net {
@@ -3153,7 +3219,7 @@ impl AppSandbox {
     }
 
     /// [`restore`](Self::restore) with the snapshot read from `dir`, where
-    /// [`snapshot_to`](Self::snapshot_to) wrote it.
+    /// [`snapshot_to`](Self::snapshot_to) or [`save_snapshot`] wrote it.
     pub fn restore_from(&mut self, dir: impl AsRef<Path>) -> Result<()> {
         self.restore(load_snapshot(dir)?)
     }
@@ -3249,7 +3315,7 @@ fn restore_snapshot(
     // size the snapshot recorded, if it did.
     let config = GuestConfig::new(
         String::new(),
-        snapshot_scratch_mb(&snapshot).map(|mb| mb * MIB),
+        snapshot_scratch_mb(&snapshot).map(mb_to_bytes),
         0,
         0,
         mounts,

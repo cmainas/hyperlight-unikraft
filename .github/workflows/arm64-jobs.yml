@@ -201,8 +201,8 @@ jobs:
       SMALL_GUESTS: >-
         --lib --bins --test bash --test cli --test compiled --test cpio --test fs_backend
         --test native_kernel --test networking --test php --test project
-        --test python --test python_shell --test quickjs --test resolv
-        --test snapshot_mounts --test step --test wasmtime
+        --test python --test python_shell --test quickjs --test resize
+        --test resolv --test snapshot_mounts --test step --test wasmtime
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
