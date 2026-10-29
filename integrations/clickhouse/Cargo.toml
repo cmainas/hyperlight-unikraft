@@ -27,3 +27,10 @@ thiserror = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# hyperlight main, for scratch resize (#1947). crates.io takes no git
+# dependency, so hyperlight-unikraft is not published until a hyperlight
+# release replaces this.
+[patch.crates-io]
+hyperlight-host = { git = "https://github.com/hyperlight-dev/hyperlight", rev = "a4563dbd585d47bfc0664d7b9559fbf0cb51d2c1" }
+hyperlight-common = { git = "https://github.com/hyperlight-dev/hyperlight", rev = "a4563dbd585d47bfc0664d7b9559fbf0cb51d2c1" }
