@@ -120,7 +120,7 @@ The server is a thin layer over [`smolagents-hyperlight`](https://github.com/hyp
 - Packages installed by the code itself, with pip, are gone after a reset; those passed with `--package` are installed again.
 - One vCPU, and threads in the guest take turns rather than run at once.
 - A guest still starting when the server exits, pulling its image or installing `--package` packages, is not stopped with it, and runs until that start ends: the executor gives the server no handle on it before then.
-- With `hluk` v0.19.1 or earlier, each Python subprocess, `pip install` included, leaves about 15 MiB of guest memory in use until the guest is restarted (a guest kernel bug, fixed in the next release).
+- With `hluk` v0.19.1 or earlier, each Python subprocess, `pip install` included, leaves about 15 MiB of guest memory in use until the guest is restarted (a guest kernel bug, fixed in v0.20.0).
 - CI tests the server on Linux (KVM) and Windows (WHP). `hluk` supports Apple silicon Macs too, but the server is not tested there yet.
 
 ## Development
