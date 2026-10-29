@@ -87,7 +87,7 @@ The executor starts `hluk run` as a child process, with a small Python script th
 
 - CI runs the tests in micro-VMs on Linux (KVM) and Windows (WHP). `hluk` supports Apple silicon Macs too, but the executor is not tested there yet.
 - One vCPU, and threads in the guest take turns rather than run at once.
-- With `hluk` v0.19.1 or earlier, memory used by a process started in the guest isn't fully freed when the process exits (a guest kernel bug, fixed in the next release): about 15 MiB per Python subprocess, `pip install` included. An agent that runs many subprocesses eventually runs out of memory; the guest is then restarted fresh and the agent's variables are lost.
+- With `hluk` v0.19.1 or earlier, memory used by a process started in the guest isn't fully freed when the process exits (a guest kernel bug, fixed in v0.20.0): about 15 MiB per Python subprocess, `pip install` included. An agent that runs many subprocesses eventually runs out of memory; the guest is then restarted fresh and the agent's variables are lost.
 - Managed agents (`CodeAgent(managed_agents=...)`) are not supported, as with smolagents' other remote executors.
 
 ## Development
