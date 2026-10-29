@@ -26,8 +26,9 @@ use clap::{Args, Subcommand};
 use tracing::info;
 
 use hyperlight_unikraft::{
-    Error, Exec, Mount, RUNTIME_SCRATCH_MB, SNAPSHOT_KEY, SandboxBuilder, default_scratch_mb,
-    driver_entry, is_runtime_driver, runtime_scratch_mb,
+    CONTAINER_SCRATCH_HEADROOM_MB, DEFAULT_SCRATCH_MB, Error, Exec, MIB, Mount, RUNTIME_SCRATCH_MB,
+    SNAPSHOT_KEY, SandboxBuilder, cgroup_memory_limit_mb, default_scratch_mb, driver_entry,
+    is_runtime_driver, runtime_scratch_mb, scratch_mb_from, scratch_mb_within,
 };
 
 use crate::{
@@ -119,10 +120,11 @@ pub struct RunArgs {
     #[arg(long, value_name = "PATH", conflicts_with_all = ["runtime", "file"])]
     kernel: Option<PathBuf>,
 
-    /// Guest memory in MiB. Default: the size the rootfs's runtime image is
-    /// tested with.
-    #[arg(long, value_name = "MIB")]
-    scratch_mb: Option<usize>,
+    /// Guest memory in MiB, or `max`: what the memory limit hluk runs under
+    /// (a container's) leaves once hluk has its own share. Default: the size
+    /// the rootfs's runtime image is tested with.
+    #[arg(long, value_name = "MIB|max")]
+    scratch_mb: Option<ScratchArg>,
 
     /// Inline code to execute (alternative to a script file).
     #[arg(long, conflicts_with = "script")]
@@ -570,11 +572,13 @@ pub fn pull(args: ProjectArgs) -> CliResult<()> {
 
 pub fn build(args: ProjectArgs) -> CliResult<()> {
     let manifest = Manifest::load(&Manifest::locate(args.manifest.as_deref())?)?;
-    run_build(&manifest)
+    run_build(&manifest, true)
 }
 
 /// The build command first, so a Dockerfile can pick up what it made.
-fn run_build(manifest: &Manifest) -> CliResult<()> {
+/// `rootfs_hint`: say when the rootfs outgrew the guest's memory; a run
+/// that follows says so itself, with the size the guest gets.
+fn run_build(manifest: &Manifest, rootfs_hint: bool) -> CliResult<()> {
     if !manifest.needs_build() {
         eprintln!("nothing to build: hluk.toml has no [build] command and no [rootfs] dockerfile");
         return Ok(());
@@ -618,24 +622,276 @@ fn run_build(manifest: &Manifest) -> CliResult<()> {
         let size = fs::metadata(&path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?
             .len();
-        scratch_hint(size, manifest.scratch_mb(&path));
+        // The rootfs is built here and run elsewhere, so no limit of this
+        // container's comes into it.
+        if rootfs_hint {
+            let (scratch_mb, by) = match manifest.run.scratch_mb {
+                Some(ScratchArg::Mib(mb)) => (mb, SizedBy::Setting),
+                Some(ScratchArg::Max) => (manifest.tested_scratch_mb(&path), SizedBy::MaxUnmet),
+                None => (manifest.tested_scratch_mb(&path), SizedBy::Setting),
+            };
+            scratch_hint(size, scratch_mb, by);
+        }
     }
     Ok(())
+}
+
+/// A guest's memory as asked for, by `--scratch-mb` or a manifest's
+/// `scratch_mb`: MiB, or `max`, what the memory limit `hluk` runs under
+/// leaves once `hluk` has its own share, so that a pod which runs `hluk
+/// run` in its image names the size once, as its limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScratchArg {
+    Mib(usize),
+    Max,
+}
+
+impl ScratchArg {
+    /// `n` MiB as a size: more than nothing, and a byte count that fits.
+    fn mib(n: u64) -> Option<Self> {
+        scratch_mb_from(n).map(ScratchArg::Mib)
+    }
+}
+
+fn invalid_scratch(what: impl std::fmt::Display) -> String {
+    format!("invalid guest memory {what}: expected MiB, 1 or more, or max")
+}
+
+impl std::str::FromStr for ScratchArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("max") {
+            return Ok(ScratchArg::Max);
+        }
+        s.parse::<u64>()
+            .ok()
+            .and_then(ScratchArg::mib)
+            .ok_or_else(|| invalid_scratch(format!("{s:?}")))
+    }
+}
+
+/// In a manifest, `scratch_mb = 512` or `scratch_mb = "max"`; anything
+/// else, a zero, a negative number, a fraction or another word, is
+/// refused with the one message.
+impl<'de> serde::Deserialize<'de> for ScratchArg {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = ScratchArg;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("guest memory in MiB, or \"max\"")
+            }
+
+            fn visit_u64<E: Error>(self, n: u64) -> Result<ScratchArg, E> {
+                ScratchArg::mib(n).ok_or_else(|| E::custom(invalid_scratch(n)))
+            }
+
+            fn visit_i64<E: Error>(self, n: i64) -> Result<ScratchArg, E> {
+                u64::try_from(n)
+                    .ok()
+                    .and_then(ScratchArg::mib)
+                    .ok_or_else(|| E::custom(invalid_scratch(n)))
+            }
+
+            fn visit_str<E: Error>(self, s: &str) -> Result<ScratchArg, E> {
+                s.parse().map_err(E::custom)
+            }
+        }
+        d.deserialize_any(Visitor)
+    }
+}
+
+/// Where a guest's size was asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// `--scratch-mb`.
+    Flag(ScratchArg),
+    /// The manifest's `scratch_mb`.
+    Manifest(ScratchArg),
+}
+
+/// How a guest got its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SizedBy {
+    /// `scratch_mb`, set or the tested default, or a snapshot's.
+    Setting,
+    /// `max`: what the memory limit `hluk` runs under leaves.
+    Max,
+    /// `max` asked for with no limit to take it from: the tested default,
+    /// for a limit to come (`hluk build`, or a manifest run elsewhere).
+    MaxUnmet,
+}
+
+/// What [`guest_memory`] decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuestMemory {
+    /// The guest's memory in MiB.
+    pub mb: usize,
+    /// How it was sized.
+    pub how: SizedBy,
+    /// The memory limit `hluk` runs under in MiB, when one is in sight.
+    pub limit: Option<usize>,
+}
+
+impl GuestMemory {
+    /// A guest of `mb` MiB that is not up for sizing (a snapshot's), under
+    /// `limit`, for the hints.
+    pub fn given(mb: usize, limit: Option<usize>) -> Self {
+        GuestMemory {
+            mb,
+            how: SizedBy::Setting,
+            limit,
+        }
+    }
+
+    /// Whether the limit holds the guest: there is none, or the guest and
+    /// `hluk`'s own share are within it.
+    pub fn fits(&self) -> bool {
+        self.limit
+            .is_none_or(|limit| self.mb.saturating_add(CONTAINER_SCRATCH_HEADROOM_MB) <= limit)
+    }
+
+    /// Whether the limit holds the guest and a snapshot of it too: the
+    /// save builds the snapshot in memory, about as much again as the
+    /// guest has used.
+    pub fn holds_a_save(&self) -> bool {
+        self.limit.is_none_or(|limit| {
+            self.mb
+                .saturating_mul(2)
+                .saturating_add(CONTAINER_SCRATCH_HEADROOM_MB)
+                <= limit
+        })
+    }
+}
+
+/// The guest's memory: `asked` (`--scratch-mb`, else the manifest's), else
+/// `tested`, the size the rootfs's runtime image is tested with (the
+/// library's default for a kernel with no rootfs).  `max` is what `limit`,
+/// the memory limit `hluk` runs under in MiB, leaves once `hluk` has its
+/// own share; on the flag it is an error without a limit to take it from,
+/// and in a manifest, which is written for a pod but runs elsewhere too,
+/// it falls back to `tested` with a note, as `hluk build` does.  Every
+/// other size stands, whatever the limit: the guest's memory is backed as
+/// it is touched, so a guest sized past the limit runs until it uses more
+/// than the limit leaves, and [`container_hint`] says so.  `tested` is
+/// asked for only when it is needed, as it may scan the rootfs.
+pub fn guest_memory(
+    asked: Option<Asked>,
+    tested: impl FnOnce() -> Option<usize>,
+    limit: Option<usize>,
+) -> CliResult<GuestMemory> {
+    let sized = |mb, how| GuestMemory { mb, how, limit };
+    let tested = move |how| Ok(sized(tested().unwrap_or(DEFAULT_SCRATCH_MB), how));
+    match (asked, limit.and_then(scratch_mb_within)) {
+        (None, _) => tested(SizedBy::Setting),
+        (Some(Asked::Flag(ScratchArg::Mib(mb)) | Asked::Manifest(ScratchArg::Mib(mb))), _) => {
+            Ok(sized(mb, SizedBy::Setting))
+        }
+        (Some(_), Some(room)) => {
+            eprintln!(
+                "note: the guest gets {room} MiB, what the memory limit hluk runs under, {} MiB, \
+                 leaves it",
+                limit.unwrap_or(0)
+            );
+            Ok(sized(room, SizedBy::Max))
+        }
+        (Some(asked), None) => {
+            let why = match limit {
+                Some(limit) => format!(
+                    "the memory limit hluk runs under, {limit} MiB, leaves too little for a \
+                     guest once hluk has its {CONTAINER_SCRATCH_HEADROOM_MB}"
+                ),
+                None => "hluk runs under no memory limit to take it from".to_string(),
+            };
+            match asked {
+                Asked::Flag(_) => Err(format!("--scratch-mb max: {why}").into()),
+                Asked::Manifest(_) => {
+                    eprintln!(
+                        "note: scratch_mb = \"max\" in the manifest: {why}; the guest gets the \
+                         size its image is tested with"
+                    );
+                    tested(SizedBy::MaxUnmet)
+                }
+            }
+        }
+    }
+}
+
+/// Say when the guest will not fit: a guest given more than the memory
+/// limit `hluk` runs under leaves, by `--scratch-mb`, a manifest, a
+/// snapshot, or a tested size past the limit, is killed by the host's
+/// kernel, not the guest's, once it uses that much.
+pub fn container_hint(sizing: &GuestMemory) {
+    if let (false, Some(limit)) = (sizing.fits(), sizing.limit) {
+        eprintln!(
+            "note: the guest gets {} MiB but hluk runs under a memory limit of {limit} MiB, of \
+             which hluk needs about {CONTAINER_SCRATCH_HEADROOM_MB}; the guest will be killed once it uses more \
+             than that leaves",
+            sizing.mb
+        );
+    }
+}
+
+/// Say, before a snapshot is saved, when the limit holds the guest but
+/// may not hold the save ([`GuestMemory::holds_a_save`]); a guest that
+/// does not fit at all has had [`container_hint`]'s word.
+pub fn save_memory_note(sizing: &GuestMemory) {
+    if let (true, false, Some(limit)) = (sizing.fits(), sizing.holds_a_save(), sizing.limit) {
+        eprintln!(
+            "note: saving the guest's snapshot takes about as much memory again as the guest \
+             has used, and the memory limit hluk runs under, {limit} MiB, may not hold a {} MiB \
+             guest and its snapshot both",
+            sizing.mb
+        );
+    }
+}
+
+/// The size the runtime image at `path` is tested with: by name for a
+/// `--runtime` or a manifest's image (a registry's `agent`, or an image
+/// reference ending in it), by the rootfs's runtime marker or driver
+/// otherwise.
+pub fn tested_scratch_mb(runtime: Option<&str>, path: &Path) -> usize {
+    runtime
+        .and_then(registry::runtime_name)
+        .and_then(runtime_scratch_mb)
+        .unwrap_or_else(|| default_scratch_mb(path))
 }
 
 /// The rootfs is unpacked into the guest's memory, so one that takes more
 /// than half of it leaves the runtime little to work with: an image that
 /// grew past the size its runtime is tested with (packages added by a
-/// Dockerfile) needs `scratch_mb` set.  Say so, with a size that leaves
-/// room, rather than let the guest fail to unpack it.
-fn scratch_hint(rootfs_bytes: u64, scratch_mb: usize) {
-    let rootfs_mb = rootfs_bytes.div_ceil(1024 * 1024) as usize;
-    if rootfs_mb * 2 > scratch_mb {
-        let suggested = (rootfs_mb * 4).next_multiple_of(256);
-        eprintln!(
-            "note: the rootfs is {rootfs_mb} MiB and [run] scratch_mb = {scratch_mb}; the rootfs \
-             is unpacked into that memory, so set scratch_mb to {suggested} or more"
-        );
+/// Dockerfile) needs `scratch_mb` set, or a bigger container.  Say so,
+/// with a size that leaves room, rather than let the guest fail to unpack
+/// it.
+fn scratch_hint(rootfs_bytes: u64, scratch_mb: usize, by: SizedBy) {
+    let rootfs_mb = rootfs_bytes.div_ceil(MIB as u64) as usize;
+    if rootfs_mb * 2 <= scratch_mb {
+        return;
+    }
+    let suggested = (rootfs_mb * 4).next_multiple_of(256);
+    let container = suggested + CONTAINER_SCRATCH_HEADROOM_MB;
+    match by {
+        SizedBy::Setting => eprintln!(
+            "note: the rootfs is {rootfs_mb} MiB and [run] scratch_mb = {scratch_mb}; the \
+             rootfs is unpacked into that memory, so set scratch_mb to {suggested} or more"
+        ),
+        SizedBy::Max => eprintln!(
+            "note: the rootfs is {rootfs_mb} MiB and max leaves the guest {scratch_mb} MiB \
+             under the memory limit hluk runs under; the rootfs is unpacked into that memory, \
+             so give the container {container} MiB or more, {suggested} for the guest and \
+             {CONTAINER_SCRATCH_HEADROOM_MB} for hluk"
+        ),
+        SizedBy::MaxUnmet => eprintln!(
+            "note: the rootfs is {rootfs_mb} MiB, more than half the {scratch_mb} MiB its \
+             runtime is tested with, and max leaves the size to the memory limit hluk runs \
+             under; the rootfs is unpacked into the guest's memory, so give the container \
+             {container} MiB or more, {suggested} for the guest and \
+             {CONTAINER_SCRATCH_HEADROOM_MB} for hluk"
+        ),
     }
 }
 
@@ -801,7 +1057,7 @@ pub fn run(args: RunArgs) -> CliResult<()> {
     } else if !explicit {
         let m = Manifest::load(&Manifest::locate(args.file.as_deref())?)?;
         if args.build {
-            run_build(&m)?;
+            run_build(&m, false)?;
         }
         rootfs = Some(project_rootfs(&m)?);
         manifest = Some(m);
@@ -898,25 +1154,35 @@ pub fn run(args: RunArgs) -> CliResult<()> {
             .map_or(args.runtime.is_some(), |m| m.run.warm)
     };
 
-    // Memory: the flag, the manifest's, else the size the runtime image is
+    // Memory: the flag (`max` is what the container's memory limit
+    // leaves), else the manifest's, else the size the runtime image is
     // tested with, by name for --runtime and a published image, by the
-    // rootfs's runtime marker or driver otherwise.  A kernel with no rootfs takes the
-    // library's default.
-    let scratch_mb = args.scratch_mb.or_else(|| {
-        let path = rootfs.as_deref()?;
-        Some(match (&manifest, &args.runtime) {
-            (Some(m), _) => m.scratch_mb(path),
-            (None, Some(runtime)) => registry::runtime_name(runtime)
-                .and_then(runtime_scratch_mb)
-                .unwrap_or_else(|| default_scratch_mb(path)),
-            (None, None) => default_scratch_mb(path),
-        })
-    });
-    if let (Some(path), Some(mb)) = (&rootfs, scratch_mb) {
+    // rootfs's runtime marker or driver otherwise, and the library's
+    // default for a kernel with no rootfs, or what the memory limit leaves
+    // for `max`.
+    let limit = cgroup_memory_limit_mb();
+    let sizing = guest_memory(
+        args.scratch_mb.map(Asked::Flag).or_else(|| {
+            manifest
+                .as_ref()
+                .and_then(|m| m.run.scratch_mb.map(Asked::Manifest))
+        }),
+        || {
+            let path = rootfs.as_deref()?;
+            Some(match &manifest {
+                Some(m) => m.tested_scratch_mb(path),
+                None => tested_scratch_mb(args.runtime.as_deref(), path),
+            })
+        },
+        limit,
+    )?;
+    let scratch_mb = sizing.mb;
+    container_hint(&sizing);
+    if let Some(path) = &rootfs {
         let size = fs::metadata(path)
             .map_err(|e| format!("cannot read the rootfs {}: {e}", path.display()))?
             .len();
-        scratch_hint(size, mb);
+        scratch_hint(size, scratch_mb, sizing.how);
     }
     if let Exec::Code(command) = &exec {
         check_pie(command, &mounts)?;
@@ -949,16 +1215,16 @@ pub fn run(args: RunArgs) -> CliResult<()> {
         };
     let env_after_save = driver && warm_exec.is_none();
     let boot_env = if env_after_save { &manifest_env } else { &env };
-    let warm_key = match (warm, &rootfs, scratch_mb) {
-        (false, _, _) => None,
-        (true, Some(path), Some(mb)) => Some(stamp(
+    let warm_key = match (warm, &rootfs) {
+        (false, _) => None,
+        (true, Some(path)) => Some(stamp(
             path,
-            mb,
+            scratch_mb,
             entry.as_deref(),
             warm_exec.as_deref(),
             boot_env,
         )?),
-        (true, _, _) => {
+        (true, None) => {
             return Err("--warm needs a rootfs: a project, --runtime or --initrd".into());
         }
     };
@@ -987,6 +1253,9 @@ pub fn run(args: RunArgs) -> CliResult<()> {
             }
         }
     }
+    if warm && !restored {
+        save_memory_note(&sizing);
+    }
     let mut builder = match builder {
         Some(b) => b,
         None => {
@@ -1001,9 +1270,7 @@ pub fn run(args: RunArgs) -> CliResult<()> {
                         .into(),
                 );
             };
-            if let Some(mb) = scratch_mb {
-                b = b.scratch_mb(mb);
-            }
+            b = b.scratch_mb(scratch_mb);
             if let Some(e) = &entry {
                 b = b.entry(e);
             }
@@ -1248,6 +1515,122 @@ pub fn cache(args: CacheArgs) -> CliResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scratch_value_is_mib_or_max() {
+        assert_eq!("512".parse(), Ok(ScratchArg::Mib(512)));
+        assert_eq!(" max ".parse(), Ok(ScratchArg::Max));
+        assert_eq!("MAX".parse(), Ok(ScratchArg::Max));
+        assert!("lots".parse::<ScratchArg>().is_err());
+        #[derive(serde::Deserialize)]
+        struct Run {
+            scratch_mb: Option<ScratchArg>,
+        }
+        let run = |s: &str| toml::from_str::<Run>(s).map(|r| r.scratch_mb);
+        assert_eq!(run("scratch_mb = 512").unwrap(), Some(ScratchArg::Mib(512)));
+        assert_eq!(run("scratch_mb = \"max\"").unwrap(), Some(ScratchArg::Max));
+        assert_eq!(run("").unwrap(), None);
+        assert!(run("scratch_mb = \"lots\"").is_err());
+        assert!(run("scratch_mb = 1.5").is_err());
+        assert!(run("scratch_mb = 0").is_err());
+        assert!(run("scratch_mb = -1").is_err());
+        assert!(run("scratch_mb = true").is_err());
+        assert!(
+            run("scratch_mb = 18446744073709551615").is_err(),
+            "a size whose bytes do not fit"
+        );
+        assert!("0".parse::<ScratchArg>().is_err());
+        assert!("-1".parse::<ScratchArg>().is_err());
+        assert!("18446744073709551615".parse::<ScratchArg>().is_err());
+        assert_eq!(
+            "lots".parse::<ScratchArg>().unwrap_err(),
+            "invalid guest memory \"lots\": expected MiB, 1 or more, or max"
+        );
+    }
+
+    #[test]
+    fn guest_memory_is_asked_else_tested_and_max_is_the_limits() {
+        use SizedBy::{Max, MaxUnmet, Setting};
+        let tested = || Some(256);
+        let got = |sizing: CliResult<GuestMemory>| sizing.map(|s| (s.mb, s.how)).unwrap();
+        // The tested size, the library's default without one, whatever the limit.
+        assert_eq!(got(guest_memory(None, tested, None)), (256, Setting));
+        assert_eq!(
+            got(guest_memory(None, || None, None)),
+            (DEFAULT_SCRATCH_MB, Setting)
+        );
+        assert_eq!(got(guest_memory(None, tested, Some(1024))), (256, Setting));
+        assert_eq!(
+            got(guest_memory(None, tested, Some(200))),
+            (256, Setting),
+            "a limit never resizes a guest; the hint speaks instead"
+        );
+        assert!(!guest_memory(None, tested, Some(200)).unwrap().fits());
+        // A size asked for stands, from the flag or the manifest.
+        let flag = Some(Asked::Flag(ScratchArg::Mib(1024)));
+        assert_eq!(got(guest_memory(flag, tested, None)), (1024, Setting));
+        assert_eq!(got(guest_memory(flag, tested, Some(200))), (1024, Setting));
+        assert_eq!(
+            got(guest_memory(flag, || panic!("not needed"), Some(1024))),
+            (1024, Setting),
+            "the rootfs is not scanned for a size that was asked for"
+        );
+        let manifest = Some(Asked::Manifest(ScratchArg::Mib(128)));
+        assert_eq!(
+            got(guest_memory(manifest, tested, Some(1024))),
+            (128, Setting)
+        );
+        // `max` is what the limit leaves, and nothing without one.
+        let max = Some(Asked::Flag(ScratchArg::Max));
+        assert_eq!(got(guest_memory(max, tested, Some(1024))), (960, Max));
+        assert_eq!(got(guest_memory(max, tested, Some(128))), (64, Max));
+        assert!(guest_memory(max, tested, Some(100)).is_err());
+        assert!(guest_memory(max, tested, None).is_err());
+        // A manifest's `max` falls back to the tested size where there is no limit to take.
+        let max = Some(Asked::Manifest(ScratchArg::Max));
+        assert_eq!(got(guest_memory(max, tested, Some(1024))), (960, Max));
+        assert_eq!(got(guest_memory(max, tested, None)), (256, MaxUnmet));
+        assert_eq!(got(guest_memory(max, tested, Some(100))), (256, MaxUnmet));
+    }
+
+    #[test]
+    fn the_guest_fits_the_limit_or_the_hint_says_not() {
+        let tested = || Some(256);
+        let fits = |asked, limit| guest_memory(asked, tested, limit).unwrap().fits();
+        let flag = |mb| Some(Asked::Flag(ScratchArg::Mib(mb)));
+        assert!(fits(None, None), "no limit, no doubt");
+        assert!(fits(flag(1024), None));
+        assert!(fits(None, Some(1024)));
+        assert!(!fits(None, Some(200)), "the tested size past the limit");
+        assert!(fits(Some(Asked::Flag(ScratchArg::Max)), Some(1024)));
+        assert!(!fits(flag(1024), Some(200)), "asked for more than there is");
+        assert!(fits(flag(136), Some(200)), "asked for just what there is");
+        assert!(!fits(flag(137), Some(200)));
+        assert!(
+            fits(flag(32), Some(100)),
+            "a small guest fits a limit too small to size one by"
+        );
+        assert!(!GuestMemory::given(1536, Some(512)).fits());
+        assert!(GuestMemory::given(1536, None).fits());
+        assert!(
+            !GuestMemory::given(usize::MAX, Some(512)).fits(),
+            "an absurd size does not wrap into a fit"
+        );
+    }
+
+    #[test]
+    fn the_limit_holds_a_save_or_the_note_says_not() {
+        let holds = |mb, limit| GuestMemory::given(mb, limit).holds_a_save();
+        assert!(holds(1472, None));
+        assert!(
+            holds(200, Some(512)),
+            "twice the guest and hluk's share fit"
+        );
+        assert!(holds(224, Some(512)));
+        assert!(!holds(225, Some(512)));
+        assert!(!holds(448, Some(512)), "what max gives never leaves room");
+        assert!(!holds(usize::MAX / 2 + 1, Some(512)));
+    }
 
     #[test]
     fn the_suggested_name_is_a_valid_one() {
